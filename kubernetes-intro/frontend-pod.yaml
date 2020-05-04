@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    run: frontend
+  name: frontend
+spec:
+  containers:
+  - image: kovtalex/hipster-frontend:v0.0.1
+    name: frontend
