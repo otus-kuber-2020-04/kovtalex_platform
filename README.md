@@ -444,10 +444,167 @@ paymentservice-7845cdfff9   0         0         0       7m20s
 
 [Документация](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#strategy) с описанием стратегий развертывания для Deployment.
 
+maxSurge - определяет количество реплик, которое можно создать с превышением значения replicas  
+Можно задавать как абсолютное число, так и процент. Default: 25%
+
+maxUnavailable - определяет количество реплик от общего числа, которое можно "уронить"  
+Аналогично, задается в процентах или числом. Default: 25%
+
 В результате должно получиться два манифеста:
 
 - paymentservice-deployment-bg.yaml
+
+Для реализации аналога blue-green развертывания устанавливаем значения:
+
+- maxSurge равным **3** для превышения количества требуемых pods
+- maxUnavailable равным **0** для ограничения минимального количества недоступных pods
+
+```yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paymentservice
+  labels:
+    app: paymentservice
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Количество реплик, которое можно создать с превышением значения replicas
+      # Можно задавать как абсолютное число, так и процент. Default: 25%
+      maxSurge: 3
+      # Количество реплик от общего числа, которое можно "уронить"
+      # Аналогично, задается в процентах или числом. Default: 25%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: paymentservice
+  template:
+    metadata:
+      labels:
+        app: paymentservice
+    spec:
+      containers:
+      - name: server
+        image: kovtalex/hipster-paymentservice:v0.0.1
+```
+
+Применим манифест:
+
+```console
+kubectl apply -f paymentservice-deployment-bg.yaml
+deployment.apps/paymentservice created
+
+kubectl get pods
+NAME                             READY   STATUS    RESTARTS   AGE
+paymentservice-84f44df66-kr62g   1/1     Running   0          30s
+paymentservice-84f44df66-ltsx8   1/1     Running   0          30s
+paymentservice-84f44df66-nn8ml   1/1     Running   0          30s
+```
+
+В манифесте **paymentservice-deployment-bg.yaml** меняем версию образа на **v0.0.2** и применяем:
+
+```console
+kubectl apply -f paymentservice-deployment-bg.yaml
+deployment.apps/paymentservice configured
+
+kubectl get pods -w
+NAME                             READY   STATUS    RESTARTS   AGE
+paymentservice-84f44df66-kr62g   1/1     Running   0          109s
+paymentservice-84f44df66-ltsx8   1/1     Running   0          109s
+paymentservice-84f44df66-nn8ml   1/1     Running   0          109s
+paymentservice-7845cdfff9-bgr7k   0/1     Pending   0          0s
+paymentservice-7845cdfff9-n6nqw   0/1     Pending   0          0s
+paymentservice-7845cdfff9-snjpm   0/1     Pending   0          0s
+paymentservice-7845cdfff9-snjpm   0/1     Pending   0          0s
+paymentservice-7845cdfff9-bgr7k   0/1     Pending   0          0s
+paymentservice-7845cdfff9-n6nqw   0/1     Pending   0          0s
+paymentservice-7845cdfff9-n6nqw   0/1     ContainerCreating   0          0s
+paymentservice-7845cdfff9-bgr7k   0/1     ContainerCreating   0          0s
+paymentservice-7845cdfff9-snjpm   0/1     ContainerCreating   0          0s
+paymentservice-7845cdfff9-snjpm   1/1     Running             0          2s
+paymentservice-7845cdfff9-n6nqw   1/1     Running             0          2s
+paymentservice-7845cdfff9-bgr7k   1/1     Running             0          3s
+paymentservice-84f44df66-nn8ml    1/1     Terminating         0          2m1s
+paymentservice-84f44df66-ltsx8    1/1     Terminating         0          2m2s
+paymentservice-84f44df66-kr62g    1/1     Terminating         0          2m2
+```
+
+> Как видно выше, сначала создаются три новых пода, а затем удаляются три старых.
+
 - paymentservice-deployment-reverse.yaml
+
+Для реализации Reverse Rolling Update устанавливаем значения:
+
+- maxSurge равным **1** для превышения количества требуемых pods
+- maxUnavailable равным **1** для ограничения минимального количества недоступных pods
+
+```yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paymentservice
+  labels:
+    app: paymentservice
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Количество реплик, которое можно создать с превышением значения replicas
+      # Можно задавать как абсолютное число, так и процент. Default: 25%
+      maxSurge: 1
+      # Количество реплик от общего числа, которое можно "уронить"
+      # Аналогично, задается в процентах или числом. Default: 25%
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: paymentservice
+  template:
+    metadata:
+      labels:
+        app: paymentservice
+    spec:
+      containers:
+      - name: server
+        image: kovtalex/hipster-paymentservice:v0.0.1
+```
+
+Проверяем результат:
+
+```console
+kubectl apply -f paymentservice-deployment-reverse.yaml | kubectl get pods -w
+
+NAME                              READY   STATUS    RESTARTS   AGE
+paymentservice-7845cdfff9-2hgrh   1/1     Running   0          92s
+paymentservice-7845cdfff9-ffg84   1/1     Running   0          91s
+paymentservice-7845cdfff9-vqjm2   1/1     Running   0          91s
+paymentservice-84f44df66-t7rph    0/1     Pending   0          0s
+paymentservice-7845cdfff9-ffg84   1/1     Terminating   0          91s
+paymentservice-84f44df66-t7rph    0/1     Pending       0          1s
+paymentservice-84f44df66-jhw47    0/1     Pending       0          0s
+paymentservice-84f44df66-t7rph    0/1     ContainerCreating   0          1s
+paymentservice-84f44df66-jhw47    0/1     Pending             0          0s
+paymentservice-84f44df66-jhw47    0/1     ContainerCreating   0          0s
+paymentservice-84f44df66-t7rph    1/1     Running             0          2s
+paymentservice-7845cdfff9-2hgrh   1/1     Terminating         0          94s
+paymentservice-84f44df66-jhw47    1/1     Running             0          1s
+paymentservice-84f44df66-sjllv    0/1     Pending             0          0s
+paymentservice-84f44df66-sjllv    0/1     Pending             0          1s
+paymentservice-84f44df66-sjllv    0/1     ContainerCreating   0          1s
+paymentservice-7845cdfff9-vqjm2   1/1     Terminating         0          94s
+paymentservice-84f44df66-sjllv    1/1     Running             0          3s
+paymentservice-7845cdfff9-ffg84   0/1     Terminating         0          2m3s
+paymentservice-7845cdfff9-2hgrh   0/1     Terminating         0          2m5s
+paymentservice-7845cdfff9-vqjm2   0/1     Terminating         0          2m5s
+paymentservice-7845cdfff9-vqjm2   0/1     Terminating         0          2m6s
+paymentservice-7845cdfff9-vqjm2   0/1     Terminating         0          2m6s
+paymentservice-7845cdfff9-2hgrh   0/1     Terminating         0          2m12s
+paymentservice-7845cdfff9-2hgrh   0/1     Terminating         0          2m12s
+paymentservice-7845cdfff9-ffg84   0/1     Terminating         0          2m11s
+paymentservice-7845cdfff9-ffg84   0/1     Terminating         0          2m12s
+```
 
 ### Probes
 
@@ -526,22 +683,111 @@ rollback_deploy_job:
 - Найдем в интернете [манифест](https://github.com/coreos/kube-prometheus/tree/master/manifests) **node-exporter-daemonset.yaml** для развертывания DaemonSet с Node Exporter
 - После применения данного DaemonSet и выполнения команды: kubectl port-forward <имя любого pod в DaemonSet> 9100:9100 доступны на localhost: curl localhost:9100/metrics
 
+Подготовим манифесты и развернем Node Exporter как DaemonSet:
+
+```console
+kubectl create ns monitoring
+namespace/monitoring created
+
+kubectl apply -f node-exporter-serviceAccount.yaml
+serviceaccount/node-exporter created
+
+kubectl apply -f node-exporter-clusterRole.yaml
+clusterrole.rbac.authorization.k8s.io/node-exporter created
+
+kubectl apply -f node-exporter-clusterRoleBinding.yaml
+clusterrolebinding.rbac.authorization.k8s.io/node-exporter created
+
+kubectl apply -f node-exporter-daemonset.yaml
+daemonset.apps/node-exporter created
+
+kubectl apply -f node-exporter-service.yaml
+service/node-exporter created
+```
+
+Проверим созданные pods:
+
+```console
+kubectl get pods -n monitoring
+
+NAME                  READY   STATUS    RESTARTS   AGE
+node-exporter-j657t   2/2     Running   0          110s
+node-exporter-k6nwd   2/2     Running   0          105s
+node-exporter-vsrzp   2/2     Running   0          119s
+```
+
+В соседнем терминале запустим проброс порта:
+
+```console
+kubectl port-forward node-exporter-j657t 9100:9100 -n monitoring
+
+Forwarding from 127.0.0.1:9100 -> 9100
+Forwarding from [::1]:9100 -> 9100
+```
+
+И убедимся, что мы можем получать метрики:
+
+```console
+curl localhost:9100/metrics
+
+# TYPE go_gc_duration_seconds summary
+go_gc_duration_seconds{quantile="0"} 0
+go_gc_duration_seconds{quantile="0.25"} 0
+go_gc_duration_seconds{quantile="0.5"} 0
+go_gc_duration_seconds{quantile="0.75"} 0
+go_gc_duration_seconds{quantile="1"} 0
+go_gc_duration_seconds_sum 0
+go_gc_duration_seconds_count 0
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 6
+# HELP go_info Information about the Go environment.
+# TYPE go_info gauge
+go_info{version="go1.12.5"} 1
+# HELP go_memstats_alloc_bytes Number of bytes allocated and still in use.
+# TYPE go_memstats_alloc_bytes gauge
+go_memstats_alloc_bytes 2.300448e+06
+# HELP go_memstats_alloc_bytes_total Total number of bytes allocated, even if freed.
+# TYPE go_memstats_alloc_bytes_total counter
+go_memstats_alloc_bytes_total 2.300448e+06
+# HELP go_memstats_buck_hash_sys_bytes Number of bytes used by the profiling bucket hash table.
+# TYPE go_memstats_buck_hash_sys_bytes gauge
+go_memstats_buck_hash_sys_bytes 1.444017e+06
+# HELP go_memstats_frees_total Total number of frees.
+...
+```
+
 ### DaemonSet | Задание с ⭐⭐
 
 - Как правило, мониторинг требуется не только для worker, но и для master нод. При этом, по умолчанию, pod управляемые DaemonSet на master нодах не разворачиваются
 - Найдем способ модернизировать свой DaemonSet таким образом, чтобы Node Exporter был развернут как на master, так и на worker нодах (конфигурацию самих нод изменять нельзя)
 - Отразим изменения в манифесте
 
-Материал по теме: [Taint and Toleration](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) и [здесь](https://shiningapples.net/kubernetes-taints-and-tolerations-%D0%B7%D0%B0%D0%BF%D1%83%D1%81%D0%BA-%D0%BF%D0%BE%D0%B4%D0%BE%D0%B2-%D0%BD%D0%B0-%D0%BC%D0%B0%D1%81%D1%82%D0%B5%D1%80%D0%B5/).
+Материал по теме: [Taint and Toleration](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/).
 
-Решение: для развертывания DaemonSet на master нодах нам необходимо выдать **допуск** поду:
+Решение: для развертывания DaemonSet на master нодах нам необходимо выдать **допуск** поду.  
+Правим наш **node-exporter-daemonset.yaml**:
 
 ```yml
 tolerations:
-- key: node-role.kubernetes.io/master
-  operator: "Exists"
-  effect: NoSchedule
+- operator: Exists
 ```
+
+Применяем манифест и проверяем, что DaemonSet развернулся на master нодах.
+
+```console
+kubectl apply -f node-exporter-daemonset.yaml
+daemonset.apps/node-exporter configured
+
+kubectl get pods -n monitoring -o wide
+NAME                  READY   STATUS    RESTARTS   AGE   IP           NODE                  NOMINATED NODE   READINESS GATES
+node-exporter-25d4s   2/2     Running   0          45m   172.18.0.6   kind-worker3          <none>           <none>
+node-exporter-8dp28   2/2     Running   0          45m   172.18.0.4   kind-control-plane    <none>           <none>
+node-exporter-bb76j   2/2     Running   0          45m   172.18.0.7   kind-control-plane2   <none>           <none>
+node-exporter-dzmm9   2/2     Running   0          45m   172.18.0.5   kind-control-plane3   <none>           <none>
+node-exporter-p9sn4   2/2     Running   0          45m   172.18.0.3   kind-worker2          <none>           <none>
+node-exporter-s8dh7   2/2     Running   0          45m   172.18.0.8   kind-worker           <none>           <none>
+````
 
 ## Настройка локального окружения. Запуск первого контейнера. Работа с kubectl
 
