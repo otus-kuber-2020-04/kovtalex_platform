@@ -1,5 +1,1371 @@
 # kovtalex_platform
 
+## Сетевое взаимодействие Pod, сервисы
+
+### Добавление проверок Pod
+
+- Откроем файл с описанием Pod из предыдущего ДЗ **kubernetes-intro/web-pod.yml**
+- Добавим в описание пода **readinessProbe**
+
+```yml
+    readinessProbe:
+      httpGet:
+        path: /index.html
+        port: 80
+```
+
+- Запустим наш под командой **kubectl apply -f webpod.yml**
+
+```console
+kubectl apply -f web-pod.yaml
+pod/web created
+```
+
+- Теперь выполним команду **kubectl get pod/web** и убедимся, что под перешел в состояние Running
+
+```console
+kubectl get pod/web
+
+NAME   READY   STATUS    RESTARTS   AGE
+web    0/1     Running   0          45s
+```
+
+Теперь сделаем команду **kubectl describe pod/web** (вывод объемный, но в нем много интересного)
+
+- Посмотрим в конце листинга на список **Conditions**:
+
+```console
+kubectl describe pod/web
+
+Conditions:
+  Type              Status
+  Initialized       True
+  Ready             False
+  ContainersReady   False
+  PodScheduled      True
+```
+
+Также посмотрим на список событий, связанных с Pod:
+
+```console
+Events:
+  Type     Reason     Age               From               Message
+  ----     ------     ----              ----               -------
+  Warning  Unhealthy  3s (x2 over 13s)  kubelet, minikube  Readiness probe failed: Get http://172.18.0.4:80/index.html: dial tcp 172.18.0.4:80: connect: connection refused
+```
+
+Из листинга выше видно, что проверка готовности контейнера завершается неудачно. Это неудивительно - вебсервер в контейнере слушает порт 8000 (по условиям первого ДЗ).
+
+Пока мы не будем исправлять эту ошибку, а добавим другой вид проверок: **livenessProbe**.
+
+- Добавим в манифест проверку состояния веб-сервера:
+
+```yml
+    livenessProbe:
+      tcpSocket: { port: 8000 }
+```
+
+- Запустим Pod с новой конфигурацией:
+
+```console
+kubectl apply -f web-pod.yaml
+pod/web created
+
+kubectl get pod/web
+NAME   READY   STATUS    RESTARTS   AGE
+web    0/1     Running   0          17s
+```
+
+Вопрос для самопроверки:
+
+- Почему следующая конфигурация валидна, но не имеет смысла?
+
+```yml
+livenessProbe:
+  exec:
+    command:
+      - 'sh'
+      - '-c'
+      - 'ps aux | grep my_web_server_process'
+```
+
+> Данная конфигурация не имеет смысла, так как не означает, что работающий веб сервер без ошибок отдает веб страницы.
+
+- Бывают ли ситуации, когда она все-таки имеет смысл?
+
+> Возможно, когда требуется проверка работы сервиса без доступа к нему из вне.
+
+### Создание Deployment
+
+В процессе изменения конфигурации Pod, мы столкнулись с неудобством обновления конфигурации пода через **kubectl** (и уже нашли ключик **--force** ).
+
+В любом случае, для управления несколькими однотипными подами такой способ не очень подходит.  
+Создадим **Deployment**, который упростит обновление конфигурации пода и управление группами подов.
+
+- Для начала, создадим новую папку **kubernetes-networks** в нашем репозитории
+- В этой папке создадим новый файл **web-deploy.yaml**
+
+Начнем заполнять наш файл-манифест для Deployment:
+
+```yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web     # Название нашего объекта Deployment
+spec:
+  replicas: 1    # Начнем с одного пода
+  selector:      # Укажем, какие поды относятся к нашему Deployment:
+    matchLabels: # - это поды с меткой
+      app: web   # app и ее значением web
+  template:      # Теперь зададим шаблон конфигурации пода
+    metadata:
+      name: web # Название Pod
+      labels: # Метки в формате key: value
+        app: web
+    spec: # Описание Pod
+      containers: # Описание контейнеров внутри Pod
+      - name: web # Название контейнера
+        image: kovtalex/simple-web:0.1 # Образ из которого создается контейнер
+        readinessProbe:
+          httpGet:
+            path: /index.html
+            port: 80
+        livenessProbe:
+          tcpSocket: { port: 8000 }
+        volumeMounts:
+        - name: app
+          mountPath: /app
+      initContainers:
+      - name: init-web
+        image: busybox:1.31.1
+        command: ['sh', '-c', 'wget -O- https://tinyurl.com/otus-k8s-intro | sh']
+        volumeMounts:
+        - name: app
+          mountPath: /app  
+      volumes:
+      - name: app
+        emptyDir: {}
+```
+
+- Для начала удалим старый под из кластера:
+
+```console
+kubectl delete pod/web --grace-period=0 --force
+pod "web" deleted
+```
+
+- И приступим к деплою:
+
+```console
+kubectl apply -f web-deploy.yaml
+deployment.apps/web created
+```
+
+- Посмотрим, что получилось:
+
+```console
+kubectl describe deployment web
+
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      False   MinimumReplicasUnavailable
+  Progressing    True    ReplicaSetUpdated
+OldReplicaSets:  <none>
+NewReplicaSet:   web-dbfcc8c76 (1/1 replicas created)
+Events:
+  Type    Reason             Age   From                   Message
+  ----    ------             ----  ----                   -------
+  Normal  ScalingReplicaSet  57s   deployment-controller  Scaled up replica set web-dbfcc8c76 to 1
+```
+
+- Поскольку мы не исправили **ReadinessProbe** , то поды, входящие в наш **Deployment**, не переходят в состояние Ready из-за неуспешной проверки
+- Это влияет На состояние всего **Deployment** (строчка Available в блоке Conditions)
+- Теперь самое время исправить ошибку! Поменяем в файле web-deploy.yaml следующие параметры:
+  - Увеличим число реплик до 3 ( replicas: 3 )
+  - Исправим порт в readinessProbe на порт 8000
+
+```yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web     # Название нашего объекта Deployment
+spec:
+  replicas: 3
+  selector:      # Укажем, какие поды относятся к нашему Deployment:
+    matchLabels: # - это поды с меткой
+      app: web   # app и ее значением web
+  template:      # Теперь зададим шаблон конфигурации пода
+    metadata:
+      name: web # Название Pod
+      labels: # Метки в формате key: value
+        app: web
+    spec: # Описание Pod
+      containers: # Описание контейнеров внутри Pod
+      - name: web # Название контейнера
+        image: kovtalex/simple-web:0.1 # Образ из которого создается контейнер
+        readinessProbe:
+          httpGet:
+            path: /index.html
+            port: 8000
+        livenessProbe:
+          tcpSocket: { port: 8000 }
+        volumeMounts:
+        - name: app
+          mountPath: /app
+      initContainers:
+      - name: init-web
+        image: busybox:1.31.1
+        command: ['sh', '-c', 'wget -O- https://tinyurl.com/otus-k8s-intro | sh']
+        volumeMounts:
+        - name: app
+          mountPath: /app  
+      volumes:
+      - name: app
+        emptyDir: {}
+```
+
+- Применим изменения командой kubectl apply -f webdeploy.yaml
+
+```console
+kubectl apply -f web-deploy.yaml
+deployment.apps/web configured
+```
+
+- Теперь проверим состояние нашего **Deployment** командой kubectl describe deploy/web и убедимся, что условия (Conditions) Available и Progressing выполняются (в столбце Status значение true)
+
+```console
+kubectl describe deployment web
+
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    NewReplicaSetAvailable
+```
+
+- Добавим в манифест ( web-deploy.yaml ) блок **strategy** (можно сразу перед шаблоном пода)
+
+```yml
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 100%
+```
+
+- Применим изменения
+
+```console
+kubectl apply -f web-deploy.yaml
+deployment.apps/web configured
+```
+
+```console
+ROLLOUT STATUS:
+- [Current rollout | Revision 8] [MODIFIED]  default/web-6596d967d4
+    ⌛ Waiting for ReplicaSet to attain minimum available Pods (0 available of a 3 minimum)
+       - [ContainersNotInitialized] web-6596d967d4-gvmlp containers with incomplete status: [init-web]
+       - [ContainersNotReady] web-6596d967d4-gvmlp containers with unready status: [web]
+       - [ContainersNotInitialized] web-6596d967d4-rz68n containers with incomplete status: [init-web]
+       - [ContainersNotReady] web-6596d967d4-rz68n containers with unready status: [web]
+       - [ContainersNotInitialized] web-6596d967d4-lzjlf containers with incomplete status: [init-web]
+       - [ContainersNotReady] web-6596d967d4-lzjlf containers with unready status: [web]
+
+- [Previous ReplicaSet | Revision 7] [MODIFIED]  default/web-54c8466885
+    ⌛ Waiting for ReplicaSet to scale to 0 Pods (3 currently exist)
+       - [Ready] web-54c8466885-rmwnb
+       - [Ready] web-54c8466885-hf7bh
+       - [Ready] web-54c8466885-jxqgk
+```
+
+> добавляются сразу 3 новых пода
+
+- Попробуем разные варианты деплоя с крайними значениями maxSurge и maxUnavailable (оба 0, оба 100%, 0 и 100%)
+- За процессом можно понаблюдать с помощью kubectl get events --watch или установить [kubespy](https://github.com/pulumi/kubespy) и использовать его **kubespy trace deploy**
+
+```yml
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 0
+```
+
+```console
+kubectl apply -f web-deploy.yaml
+
+The Deployment "web" is invalid: spec.strategy.rollingUpdate.maxUnavailable: Invalid value: intstr.IntOrString{Type:0, IntVal:0, StrVal:""}: may not be 0 when `maxSurge` is 0
+```
+
+> оба значения не могут быть одновременно равны 0
+
+```yml
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 100%
+      maxSurge: 0
+```
+
+```console
+ROLLOUT STATUS:
+- [Current rollout | Revision 7] [MODIFIED]  default/web-54c8466885
+    ⌛ Waiting for ReplicaSet to attain minimum available Pods (0 available of a 3 minimum)
+       - [ContainersNotReady] web-54c8466885-hf7bh containers with unready status: [web]
+       - [ContainersNotReady] web-54c8466885-jxqgk containers with unready status: [web]
+       - [ContainersNotReady] web-54c8466885-rmwnb containers with unready status: [web]
+```
+
+> удаление 3 старых подов и затем создание трех новых
+
+```yml
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 100%
+      maxSurge: 100%
+```
+
+```console
+kubectl get events -w
+
+0s          Normal    Scheduled                 pod/web-54c8466885-b8lvv    Successfully assigned default/web-54c8466885-b8lvv to minikube
+0s          Normal    Killing                   pod/web-6596d967d4-chgtq    Stopping container web
+0s          Normal    Scheduled                 pod/web-54c8466885-v2229    Successfully assigned default/web-54c8466885-v2229 to minikube
+0s          Normal    Scheduled                 pod/web-54c8466885-xjtgn    Successfully assigned default/web-54c8466885-xjtgn to minikube
+0s          Normal    Killing                   pod/web-6596d967d4-qcgkv    Stopping container web
+0s          Normal    Killing                   pod/web-6596d967d4-678v7    Stopping container web
+0s          Normal    Pulled                    pod/web-54c8466885-b8lvv    Container image "busybox:1.31.1" already present on machine
+0s          Normal    Created                   pod/web-54c8466885-b8lvv    Created container init-web
+0s          Normal    Pulled                    pod/web-54c8466885-v2229    Container image "busybox:1.31.1" already present on machine
+0s          Normal    Pulled                    pod/web-54c8466885-xjtgn    Container image "busybox:1.31.1" already present on machine
+0s          Normal    Created                   pod/web-54c8466885-v2229    Created container init-web
+0s          Normal    Created                   pod/web-54c8466885-xjtgn    Created container init-web
+0s          Normal    Started                   pod/web-54c8466885-b8lvv    Started container init-web
+0s          Normal    Started                   pod/web-54c8466885-v2229    Started container init-web
+0s          Normal    Started                   pod/web-54c8466885-xjtgn    Started container init-web
+0s          Normal    Pulled                    pod/web-54c8466885-xjtgn    Container image "kovtalex/simple-web:0.2" already present on machine
+0s          Normal    Pulled                    pod/web-54c8466885-v2229    Container image "kovtalex/simple-web:0.2" already present on machine
+0s          Normal    Pulled                    pod/web-54c8466885-b8lvv    Container image "kovtalex/simple-web:0.2" already present on machine
+0s          Normal    Created                   pod/web-54c8466885-xjtgn    Created container web
+0s          Normal    Created                   pod/web-54c8466885-v2229    Created container web
+0s          Normal    Created                   pod/web-54c8466885-b8lvv    Created container web
+0s          Normal    Started                   pod/web-54c8466885-xjtgn    Started container web
+0s          Normal    Started                   pod/web-54c8466885-v2229    Started container web
+0s          Normal    Started                   pod/web-54c8466885-b8lvv    Started container web
+```
+
+> Одновременное удаление трех старых и создание трех новых подов
+
+### Создание Service
+
+Для того, чтобы наше приложение было доступно внутри кластера (а тем более - снаружи), нам потребуется объект типа **Service** . Начнем с самого распространенного типа сервисов - **ClusterIP**.
+
+- ClusterIP выделяет для каждого сервиса IP-адрес из особого диапазона (этот адрес виртуален и даже не настраивается на сетевых интерфейсах)
+- Когда под внутри кластера пытается подключиться к виртуальному IP-адресу сервиса, то нода, где запущен под меняет адрес получателя в сетевых пакетах на настоящий адрес пода.
+- Нигде в сети, за пределами ноды, виртуальный ClusterIP не встречается.
+
+ClusterIP удобны в тех случаях, когда:
+
+- Нам не надо подключаться к конкретному поду сервиса
+- Нас устраивается случайное расределение подключений между подами
+- Нам нужна стабильная точка подключения к сервису, независимая от подов, нод и DNS-имен
+
+Например:
+
+- Подключения клиентов к кластеру БД (multi-read) или хранилищу
+- Простейшая (не совсем, use IPVS, Luke) балансировка нагрузки внутри кластера
+
+Итак, создадим манифест для нашего сервиса в папке kubernetes-networks.
+
+- Файл web-svc-cip.yaml:
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-svc-cip
+spec:
+  selector:
+    app: web
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+```
+
+- Применим изменения: kubectl apply -f web-svc-cip.yaml
+
+```console
+kubectl apply -f web-svc-cip.yaml
+service/web-svc-cip created
+```
+
+- Проверим результат (отметим назначенный CLUSTER-IP):
+
+```console
+kubectl get svc
+
+NAME          TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+kubernetes    ClusterIP   10.96.0.1      <none>        443/TCP   41m
+web-svc-cip   ClusterIP   10.97.60.103   <none>        80/TCP    13s
+```
+
+Подключимся к ВМ Minikube (команда minikube ssh и затем sudo -i ):
+
+- Сделаем curl <http://10.97.60.103/index.html> - работает!
+
+```console
+sudo -i
+curl http://10.97.60.103/index.html
+```
+
+- Сделаем ping 10.97.60.103 - пинга нет
+
+```console
+ping 10.97.60.103
+PING 10.97.60.103 (10.97.60.103) 56(84) bytes of data.
+```
+
+- Сделаем arp -an , ip addr show - нигде нет ClusterIP
+- Сделаем iptables --list -nv -t nat - вот где наш кластерный IP!
+
+```console
+iptables --list -nv -t nat
+
+Chain PREROUTING (policy ACCEPT 1 packets, 60 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+   39  2627 KUBE-SERVICES  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes service portals */
+    7   420 DOCKER     all  --  *      *       0.0.0.0/0            0.0.0.0/0            ADDRTYPE match dst-type LOCAL
+
+Chain INPUT (policy ACCEPT 1 packets, 60 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain OUTPUT (policy ACCEPT 62 packets, 3720 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+ 2551  154K KUBE-SERVICES  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes service portals */
+  349 20940 DOCKER     all  --  *      *       0.0.0.0/0           !127.0.0.0/8          ADDRTYPE match dst-type LOCAL
+
+Chain POSTROUTING (policy ACCEPT 18 packets, 1080 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+ 2728  165K KUBE-POSTROUTING  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes postrouting rules */
+   10   657 MASQUERADE  all  --  *      !docker0  172.18.0.0/16        0.0.0.0/0
+ 1424 86064 KIND-MASQ-AGENT  all  --  *      *       0.0.0.0/0            0.0.0.0/0            ADDRTYPE match dst-type !LOCAL /* kind-masq-agent: ensure nat POSTROUTING directs all non-LOCAL destination traffic to our custom KIND-MASQ-AGENT chain */
+
+Chain DOCKER (2 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 RETURN     all  --  docker0 *       0.0.0.0/0            0.0.0.0/0
+
+Chain KIND-MASQ-AGENT (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 RETURN     all  --  *      *       0.0.0.0/0            10.244.0.0/16        /* kind-masq-agent: local traffic is not subject to MASQUERADE */
+ 1424 86064 MASQUERADE  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kind-masq-agent: outbound traffic is subject to MASQUERADE (must be last in chain) */
+
+Chain KUBE-KUBELET-CANARY (0 references)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain KUBE-MARK-DROP (0 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            MARK or 0x8000
+
+Chain KUBE-MARK-MASQ (15 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            MARK or 0x4000
+
+Chain KUBE-NODEPORTS (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain KUBE-POSTROUTING (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 MASQUERADE  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes service traffic requiring SNAT */ mark match 0x4000/0x4000 random-fully
+
+Chain KUBE-PROXY-CANARY (0 references)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain KUBE-SEP-5EZNUB76DNDU3ZTK (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.3           0.0.0.0/0            /* kube-system/kube-dns:dns */
+    0     0 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns */ udp to:172.18.0.3:53
+
+Chain KUBE-SEP-FBR7GW7VHBPLDP7B (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.3           0.0.0.0/0            /* kube-system/kube-dns:metrics */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:metrics */ tcp to:172.18.0.3:9153
+
+Chain KUBE-SEP-KLMOTHZKN3LNJ7NB (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.2           0.0.0.0/0            /* kube-system/kube-dns:dns */
+    0     0 DNAT       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns */ udp to:172.18.0.2:53
+
+Chain KUBE-SEP-PATXOTJBHFPU4CNS (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.17.0.2           0.0.0.0/0            /* default/kubernetes:https */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/kubernetes:https */ tcp to:172.17.0.2:8443
+
+Chain KUBE-SEP-PXI5DVWAQX37NI6K (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.5           0.0.0.0/0            /* default/web-svc-cip: */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ tcp to:172.18.0.5:8000
+
+Chain KUBE-SEP-QBJZSVSYALF66SO6 (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.4           0.0.0.0/0            /* default/web-svc-cip: */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ tcp to:172.18.0.4:8000
+
+Chain KUBE-SEP-RYTAWN2VNC6HJFUQ (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.3           0.0.0.0/0            /* kube-system/kube-dns:dns-tcp */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns-tcp */ tcp to:172.18.0.3:53
+
+Chain KUBE-SEP-S77W6PMQVTFQMRF2 (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.2           0.0.0.0/0            /* kube-system/kube-dns:dns-tcp */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns-tcp */ tcp to:172.18.0.2:53
+
+Chain KUBE-SEP-SZWO3ZNWGEEQBN7C (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.6           0.0.0.0/0            /* default/web-svc-cip: */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ tcp to:172.18.0.6:8000
+
+Chain KUBE-SEP-Z2QZYSORHBODDMUQ (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.2           0.0.0.0/0            /* kube-system/kube-dns:metrics */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:metrics */ tcp to:172.18.0.2:9153
+
+Chain KUBE-SERVICES (2 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  tcp  --  *      *      !10.244.0.0/16        10.96.0.1            /* default/kubernetes:https cluster IP */ tcp dpt:443
+    0     0 KUBE-SVC-NPX46M4PTMTKRN6Y  tcp  --  *      *       0.0.0.0/0            10.96.0.1            /* default/kubernetes:https cluster IP */ tcp dpt:443
+    0     0 KUBE-MARK-MASQ  udp  --  *      *      !10.244.0.0/16        10.96.0.10           /* kube-system/kube-dns:dns cluster IP */ udp dpt:53
+    0     0 KUBE-SVC-TCOU7JCQXEZGVUNU  udp  --  *      *       0.0.0.0/0            10.96.0.10           /* kube-system/kube-dns:dns cluster IP */ udp dpt:53
+    0     0 KUBE-MARK-MASQ  tcp  --  *      *      !10.244.0.0/16        10.96.0.10           /* kube-system/kube-dns:dns-tcp cluster IP */ tcp dpt:53
+    0     0 KUBE-SVC-ERIFXISQEP7F7OF4  tcp  --  *      *       0.0.0.0/0            10.96.0.10           /* kube-system/kube-dns:dns-tcp cluster IP */ tcp dpt:53
+    0     0 KUBE-MARK-MASQ  tcp  --  *      *      !10.244.0.0/16        10.96.0.10           /* kube-system/kube-dns:metrics cluster IP */ tcp dpt:9153
+    0     0 KUBE-SVC-JD5MR3NA4I4DYORP  tcp  --  *      *       0.0.0.0/0            10.96.0.10           /* kube-system/kube-dns:metrics cluster IP */ tcp dpt:9153
+    0     0 KUBE-MARK-MASQ  tcp  --  *      *      !10.244.0.0/16        10.97.60.103         /* default/web-svc-cip: cluster IP */ tcp dpt:80
+    0     0 KUBE-SVC-WKCOG6KH24K26XRJ  tcp  --  *      *       0.0.0.0/0            10.97.60.103         /* default/web-svc-cip: cluster IP */ tcp dpt:80
+  127  7620 KUBE-NODEPORTS  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes service nodeports; NOTE: this must be the last rule in this chain */ ADDRTYPE match dst-type LOCAL
+
+Chain KUBE-SVC-ERIFXISQEP7F7OF4 (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-SEP-S77W6PMQVTFQMRF2  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns-tcp */ statistic mode random probability 0.50000000000
+    0     0 KUBE-SEP-RYTAWN2VNC6HJFUQ  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns-tcp */
+
+Chain KUBE-SVC-JD5MR3NA4I4DYORP (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-SEP-Z2QZYSORHBODDMUQ  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:metrics */ statistic mode random probability 0.50000000000
+    0     0 KUBE-SEP-FBR7GW7VHBPLDP7B  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:metrics */
+
+Chain KUBE-SVC-NPX46M4PTMTKRN6Y (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-SEP-PATXOTJBHFPU4CNS  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/kubernetes:https */
+
+Chain KUBE-SVC-TCOU7JCQXEZGVUNU (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-SEP-KLMOTHZKN3LNJ7NB  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns */ statistic mode random probability 0.50000000000
+    0     0 KUBE-SEP-5EZNUB76DNDU3ZTK  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kube-system/kube-dns:dns */
+
+Chain KUBE-SVC-WKCOG6KH24K26XRJ (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-SEP-QBJZSVSYALF66SO6  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ statistic mode random probability 0.33333333349
+    0     0 KUBE-SEP-PXI5DVWAQX37NI6K  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ statistic mode random probability 0.50000000000
+    0     0 KUBE-SEP-SZWO3ZNWGEEQBN7C  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */
+```
+
+- Нужное правило находится в цепочке KUBE-SERVICES
+
+```console
+Chain KUBE-SERVICES (2 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  tcp  --  *      *      !10.244.0.0/16        10.97.60.103         /* default/web-svc-cip: cluster IP */ tcp dpt:80
+    0     0 KUBE-SVC-WKCOG6KH24K26XRJ  tcp  --  *      *       0.0.0.0/0            10.97.60.103         /* default/web-svc-cip: cluster IP */ tcp dpt:80
+````
+
+- Затем мы переходим в цепочку KUBE-SVC-..... - здесь находятся правила "балансировки" между цепочками KUBESEP-..... (SVC - очевидно Service)
+
+```console
+Chain KUBE-SVC-WKCOG6KH24K26XRJ (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-SEP-QBJZSVSYALF66SO6  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ statistic mode random probability 0.33333333349
+    0     0 KUBE-SEP-PXI5DVWAQX37NI6K  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ statistic mode random probability 0.50000000000
+    0     0 KUBE-SEP-SZWO3ZNWGEEQBN7C  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */
+```
+
+- В цепочках KUBE-SEP-..... находятся конкретные правила перенаправления трафика (через DNAT) (SEP - Service Endpoint)
+
+```console
+
+Chain KUBE-SEP-PXI5DVWAQX37NI6K (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.5           0.0.0.0/0            /* default/web-svc-cip: */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ tcp to:172.18.0.5:8000
+
+Chain KUBE-SEP-QBJZSVSYALF66SO6 (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.4           0.0.0.0/0            /* default/web-svc-cip: */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ tcp to:172.18.0.4:8000
+
+Chain KUBE-SEP-SZWO3ZNWGEEQBN7C (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       172.18.0.6           0.0.0.0/0            /* default/web-svc-cip: */
+    0     0 DNAT       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* default/web-svc-cip: */ tcp to:172.18.0.6:8000
+```
+
+> Подробное описание можно почитать [тут](https://msazure.club/kubernetes-services-and-iptables/)
+
+### Включение IPVS
+
+Итак, с версии 1.0.0 Minikube поддерживает работу kubeproxy в режиме IPVS. Попробуем включить его "наживую".
+
+> При запуске нового инстанса Minikube лучше использовать ключ **--extra-config** и сразу указать, что мы хотим IPVS: **minikube start --extra-config=kube-proxy.mode="ipvs"**
+
+- Включим IPVS для kube-proxy, исправив ConfigMap (конфигурация Pod, хранящаяся в кластере)
+  - Выполним команду **kubectl --namespace kube-system edit configmap/kube-proxy**
+  - Или minikube dashboard (далее надо выбрать namespace kube-system, Configs and Storage/Config Maps)
+- Теперь найдем в файле конфигурации kube-proxy строку **mode: ""**
+- Изменим значение **mode** с пустого на **ipvs** и добавим параметр **strictARP: true** и сохраним изменения
+
+```yml
+ipvs:
+  strictARP: true
+mode: "ipvs"
+```
+
+- Теперь удалим Pod с kube-proxy, чтобы применить новую конфигурацию (он входит в DaemonSet и будет запущен автоматически)
+
+```console
+kubectl --namespace kube-system delete pod --selector='k8s-app=kube-proxy'
+pod "kube-proxy-7cwgh" deleted
+```
+
+> Описание работы и настройки [IPVS в K8S](https://github.com/kubernetes/kubernetes/blob/master/pkg/proxy/ipvs/README.md)  
+> Причины включения strictARP описаны [тут](https://github.com/metallb/metallb/issues/153)
+
+- После успешного рестарта kube-proxy выполним команду minikube ssh и проверим, что получилось
+- Выполним команду **iptables --list -nv -t nat** в ВМ Minikube
+- Что-то поменялось, но старые цепочки на месте (хотя у них теперь 0 references) �
+  - kube-proxy настроил все по-новому, но не удалил мусор
+  - Запуск kube-proxy --cleanup в нужном поде - тоже не помогает
+
+```console
+kubectl --namespace kube-system exec kube-proxy-<POD> kube-proxy --cleanup
+
+W0520 09:57:48.045293     606 server.go:225] WARNING: all flags other than --config, --write-config-to, and --cleanup are deprecated. Please begin using a config file ASAP.
+```
+
+Полностью очистим все правила iptables:
+
+- Создадим в ВМ с Minikube файл /tmp/iptables.cleanup
+
+```console
+*nat
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+COMMIT
+*filter
+COMMIT
+*mangle
+COMMIT
+```
+
+- Применим конфигурацию: iptables-restore /tmp/iptables.cleanup
+
+```console
+iptables-restore /tmp/iptables.cleanup
+```
+
+- Теперь надо подождать (примерно 30 секунд), пока kube-proxy восстановит правила для сервисов
+- Проверим результат iptables --list -nv -t nat
+
+```console
+iptables --list -nv -t nat
+
+Chain PREROUTING (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-SERVICES  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes service portals */
+
+Chain INPUT (policy ACCEPT 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain OUTPUT (policy ACCEPT 9 packets, 540 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+   62  3720 KUBE-SERVICES  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes service portals */
+
+Chain POSTROUTING (policy ACCEPT 2 packets, 120 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+   61  3660 KUBE-POSTROUTING  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes postrouting rules */
+    7   420 MASQUERADE  all  --  *      !docker0  172.17.0.0/16        0.0.0.0/0
+   66  3960 KIND-MASQ-AGENT  all  --  *      *       0.0.0.0/0            0.0.0.0/0            ADDRTYPE match dst-type !LOCAL /* kind-masq-agent: ensure nat POSTROUTING directs all non-LOCAL destination traffic to our custom KIND-MASQ-AGENT chain */
+
+Chain KIND-MASQ-AGENT (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 RETURN     all  --  *      *       0.0.0.0/0            10.244.0.0/16        /* kind-masq-agent: local traffic is not subject to MASQUERADE */
+   66  3960 MASQUERADE  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kind-masq-agent: outbound traffic is subject to MASQUERADE (must be last in chain) */
+
+Chain KUBE-FIREWALL (0 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-DROP  all  --  *      *       0.0.0.0/0            0.0.0.0/0
+
+Chain KUBE-KUBELET-CANARY (0 references)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain KUBE-LOAD-BALANCER (0 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *       0.0.0.0/0            0.0.0.0/0
+
+Chain KUBE-MARK-DROP (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain KUBE-MARK-MASQ (2 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            MARK or 0x4000
+
+Chain KUBE-NODE-PORT (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+
+Chain KUBE-POSTROUTING (1 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 MASQUERADE  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* kubernetes service traffic requiring SNAT */ mark match 0x4000/0x4000 random-fully
+    0     0 MASQUERADE  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* Kubernetes endpoints dst ip:port, source ip for solving hairpin purpose */ match-set KUBE-LOOP-BACK dst,dst,src
+
+Chain KUBE-SERVICES (2 references)
+ pkts bytes target     prot opt in     out     source               destination
+    0     0 KUBE-MARK-MASQ  all  --  *      *      !10.244.0.0/16        0.0.0.0/0            /* Kubernetes service cluster ip + port for masquerade purpose */ match-set KUBE-CLUSTER-IP dst,dst
+    6   360 KUBE-NODE-PORT  all  --  *      *       0.0.0.0/0            0.0.0.0/0            ADDRTYPE match dst-type LOCAL
+    0     0 ACCEPT     all  --  *      *       0.0.0.0/0            0.0.0.0/0            match-set KUBE-CLUSTER-IP dst,dst
+```
+
+- Итак, лишние правила удалены и мы видим только актуальную конфигурацию
+  - kube-proxy периодически делает полную синхронизацию правил в своих цепочках)
+- Как посмотреть конфигурацию IPVS? Ведь в ВМ нет утилиты ipvsadm ?
+  - В ВМ выполним команду toolbox - в результате мы окажется в контейнере с Fedora
+  - Теперь установим ipvsadm: dnf install -y ipvsadm && dnf clean all
+
+Выполним ipvsadm --list -n и среди прочих сервисов найдем наш:
+
+```console
+ipvsadm --list -n
+
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  10.97.60.103:80 rr
+  -> 172.18.0.4:8000              Masq    1      0          0
+  -> 172.18.0.5:8000              Masq    1      0          0
+  -> 172.18.0.6:8000              Masq    1      0          0
+```
+
+- Теперь выйдем из контейнера toolbox и сделаем ping кластерного IP:
+
+```console
+ping 10.97.60.103
+
+PING 10.97.60.103 (10.97.60.103) 56(84) bytes of data.
+64 bytes from 10.97.60.103: icmp_seq=1 ttl=64 time=0.030 ms
+64 bytes from 10.97.60.103: icmp_seq=2 ttl=64 time=0.077 ms
+64 bytes from 10.97.60.103: icmp_seq=3 ttl=64 time=0.038 ms
+64 bytes from 10.97.60.103: icmp_seq=4 ttl=64 time=0.064 ms
+```
+
+Итак, все работает. Но почему пингуется виртуальный IP?
+
+Все просто - он уже не такой виртуальный. Этот IP теперь есть на интерфейсе kube-ipvs0:
+
+```console
+ip addr show kube-ipvs0
+17: kube-ipvs0: <BROADCAST,NOARP> mtu 1500 qdisc noop state DOWN group default
+    link/ether a6:de:ae:75:df:04 brd ff:ff:ff:ff:ff:ff
+    inet 10.97.60.103/32 brd 10.97.60.103 scope global kube-ipvs0
+       valid_lft forever preferred_lft forever
+```
+
+> Также, правила в iptables построены по-другому. Вместо цепочки правил для каждого сервиса, теперь используются хэш-таблицы (ipset). Можем посмотреть их, установив утилиту ipset в toolbox .
+
+```console
+ipset list
+
+Name: KUBE-LOOP-BACK
+Type: hash:ip,port,ip
+Revision: 5
+Header: family inet hashsize 1024 maxelem 65536
+Size in memory: 816
+References: 1
+Number of entries: 9
+Members:
+172.18.0.4,6:8000,172.18.0.4
+172.18.0.5,6:8000,172.18.0.5
+172.18.0.6,6:8000,172.18.0.6
+
+Name: KUBE-CLUSTER-IP
+Type: hash:ip,port
+Revision: 5
+Header: family inet hashsize 1024 maxelem 65536
+Size in memory: 408
+References: 2
+Number of entries: 5
+Members:
+10.97.60.103,6:80
+```
+
+### Работа с LoadBalancer и Ingress - Установка MetalLB
+
+MetalLB позволяет запустить внутри кластера L4-балансировщик, который будет принимать извне запросы к сервисам и раскидывать их между подами. Установка его проста:
+
+```console
+kubectl apply -f
+https://raw.githubusercontent.com/metallb/metallb/v0.9.3/manifests/namespace.yaml
+kubectl apply -f
+https://raw.githubusercontent.com/metallb/metallb/v0.9.3/manifests/metallb.yaml
+kubectl create secret generic -n metallb-system memberlist --fromliteral=secretkey="$(openssl rand -base64 128)"
+```
+
+> ❗ В продуктиве так делать не надо. Сначала стоит скачать файл и разобраться, что там внутри
+
+Проверим, что были созданы нужные объекты:
+
+```console
+kubectl --namespace metallb-system get all
+
+NAME                              READY   STATUS    RESTARTS   AGE
+pod/controller-5468756d88-nxh2f   1/1     Running   0          19s
+pod/speaker-rkb5s                 1/1     Running   0          19s
+
+NAME                     DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                 AGE
+daemonset.apps/speaker   1         1         1       1            1           beta.kubernetes.io/os=linux   19s
+
+NAME                         READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/controller   1/1     1            1           19s
+
+NAME                                    DESIRED   CURRENT   READY   AGE
+replicaset.apps/controller-5468756d88   1         1         1       19s
+```
+
+Теперь настроим балансировщик с помощью ConfigMap
+
+- Создадмс манифест metallb-config.yaml в папке kubernetes-networks:
+
+```yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: metallb-system
+  name: config
+data:
+  config: |
+    address-pools:
+      - name: default
+        protocol: layer2
+        addresses:
+          - "172.17.255.1-172.17.255.255"
+```
+
+- В конфигурации мы настраиваем:
+  - Режим L2 (анонс адресов балансировщиков с помощью ARP)
+  - Создаем пул адресов 172.17.255.1-172.17.255.255 - они будут назначаться сервисам с типом LoadBalancer
+- Теперь можно применить наш манифест: kubectl apply -f metallb-config.yaml
+- Контроллер подхватит изменения автоматически
+
+```console
+kubectl apply -f metallb-config.yaml
+configmap/config created
+```
+
+### MetalLB | Проверка конфигурации
+
+Сделаем копию файла web-svc-cip.yaml в web-svclb.yaml и откроем его в редакторе:
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-svc-lb
+spec:
+  selector:
+    app: web
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+```
+
+- Применим манифест
+
+```console
+kubectl apply -f web-svc-lb.yaml
+service/web-svc-lb created
+```
+
+- Теперь посмотрим логи пода-контроллера MetalLB
+
+```console
+kubectl --namespace metallb-system logs pod/controller-5468756d88-flqbf
+
+{"caller":"service.go:98","event":"ipAllocated","ip":"172.17.255.1","msg":"IP address assigned by controller","service":"default/web-svc-lb","ts":"2020-05-21T19:38:21.161120726Z"}
+```
+
+Обратим внимание на назначенный IP-адрес (или посмотрим его в выводе kubectl describe svc websvc-lb)
+
+```console
+kubectl describe svc web-svc-lb
+
+Name:                     web-svc-lb
+Namespace:                default
+Labels:                   <none>
+Annotations:              kubectl.kubernetes.io/last-applied-configuration:
+                            {"apiVersion":"v1","kind":"Service","metadata":{"annotations":{},"name":"web-svc-lb","namespace":"default"},"spec":{"ports":[{"port":80,"p...
+Selector:                 app=web
+Type:                     LoadBalancer
+IP:                       10.103.160.42
+LoadBalancer Ingress:     172.17.255.1
+Port:                     <unset>  80/TCP
+TargetPort:               8000/TCP
+NodePort:                 <unset>  32615/TCP
+Endpoints:                172.17.0.5:8000,172.17.0.6:8000,172.17.0.7:8000
+Session Affinity:         None
+External Traffic Policy:  Cluster
+Events:
+  Type    Reason       Age   From                Message
+  ----    ------       ----  ----                -------
+  Normal  IPAllocated  106s  metallb-controller  Assigned IP "172.17.255.1"
+````
+
+- Если мы попробуем открыть URL <http://172.17.255.1/index.html>, то... ничего не выйдет.
+
+- Это потому, что сеть кластера изолирована от нашей основной ОС (а ОС не знает ничего о подсети для балансировщиков)
+- Чтобы это поправить, добавим статический маршрут:
+  - В реальном окружении это решается добавлением нужной подсети на интерфейс сетевого оборудования
+  - Или использованием L3-режима (что потребует усилий от сетевиков, но более предпочтительно)
+
+- Найдем IP-адрес виртуалки с Minikube. Например так:
+
+```console
+minikube ssh
+
+ip addr show eth0
+42: eth0@if43: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default
+    link/ether 02:42:ac:11:00:02 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet 172.17.0.2/16 brd 172.17.255.255 scope global eth0
+       valid_lft forever preferred_lft forever
+````
+
+- Добавим маршрут в вашей ОС на IP-адрес Minikube:
+
+```console
+sudo route add 172.17.255.0/24 172.17.0.2
+```
+
+DISCLAIMER:
+
+Добавление маршрута может иметь другой синтаксис (например, ip route add 172.17.255.0/24 via 192.168.64.4 в ОС Linux) или вообще не сработать (в зависимости от VM Driver в Minkube).
+
+В этом случае, не надо расстраиваться - работу наших сервисов и манифестов можно проверить из консоли Minikube, просто будет не так эффектно.
+
+> P.S. - Самый простой способ найти IP виртуалки с minikube - minikube ip
+
+Все получилось, можно открыть в браузере URL с IP-адресом нашего балансировщика и посмотреть, как космические корабли бороздят просторы вселенной.
+
+Если пообновлять страничку с помощью Ctrl-F5 (т.е. игнорируя кэш), то будет видно, что каждый наш запрос приходит на другой под. Причем, порядок смены подов - всегда один и тот же.
+
+Так работает IPVS - по умолчанию он использует **rr** (Round-Robin) балансировку.
+
+К сожалению, выбрать алгоритм на уровне манифеста сервиса нельзя. Но когда-нибудь, эта полезная фича [появится](https://kubernetes.io/blog/2018/07/09/ipvs-based-in-cluster-load-balancing-deep-dive/).
+
+> Доступные алгоритмы балансировки описаны [здесь](https://github.com/kubernetes/kubernetes/blob/1cb3b5807ec37490b4582f22d991c043cc468195/pkg/proxy/apis/config/types.go#L185) и появится [здесь](http://www.linuxvirtualserver.org/docs/scheduling.html).
+
+### Задание со ⭐ | DNS через MetalLB
+
+- Сделаем сервис LoadBalancer, который откроет доступ к CoreDNS снаружи кластера (позволит получать записи через внешний IP). Например, nslookup web.default.cluster.local 172.17.255.10.
+- Поскольку DNS работает по TCP и UDP протоколам - учтем это в конфигурации. Оба протокола должны работать по одному и тому же IP-адресу балансировщика.
+- Полученные манифесты положим в подкаталог ./coredns
+
+> 😉 [Hint](https://metallb.universe.tf/usage/)
+
+Для выполнения задания создадим манифест с двумя сервисами типа LB включающие размещение на общем IP:
+
+- аннотацию **metallb.universe.tf/allow-shared-ip** равную для обоих сервисов
+- spec.loadBalancerIP равный для обоих сервисов
+
+coredns-svc-lb.yaml
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns-svc-lb-tcp
+  annotations:
+    metallb.universe.tf/allow-shared-ip: coredns
+spec:
+  loadBalancerIP: 172.17.255.2
+  selector:
+    k8s-app: kube-dns
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 53
+      targetPort: 53
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns-svc-lb-udp
+  annotations:
+    metallb.universe.tf/allow-shared-ip: coredns
+spec:
+  loadBalancerIP: 172.17.255.2
+  selector:
+    k8s-app: kube-dns
+  type: LoadBalancer
+  ports:
+    - protocol: UDP
+      port: 53
+      targetPort: 53
+```
+
+Применим манифест:
+
+```console
+kubectl apply -f coredns-svc-lb.yaml -n kube-system
+service/coredns-svc-lb-tcp created
+service/coredns-svc-lb-udp created
+```
+
+Проверим, что сервисы создались:
+
+```console
+kubectl get svc -n kube-system | grep coredns-svc
+coredns-svc-lb-tcp   LoadBalancer   10.111.58.253   172.17.255.2   53:31250/TCP             90s
+coredns-svc-lb-udp   LoadBalancer   10.96.243.226   172.17.255.2   53:32442/UDP             89s
+```
+
+Обратимся к DNS:
+
+```console
+nslookup web-svc-cip.default.svc.cluster.local 172.17.255.2
+
+Server:         172.17.255.2
+Address:        172.17.255.2#53
+
+Name:   web-svc-cip.default.svc.cluster.local
+Address: 10.104.155.78
+```
+
+### Создание Ingress
+
+Теперь, когда у нас есть балансировщик, можно заняться Ingress-контроллером и прокси:
+
+- неудобно, когда на каждый Web-сервис надо выделять свой IP-адрес
+- а еще хочется балансировку по HTTP-заголовкам (sticky sessions)
+
+Для нашего домашнего задания возьмем почти "коробочный" **ingress-nginx** от проекта Kubernetes. Это "достаточно хороший" Ingress для умеренных нагрузок, основанный на OpenResty и пачке Lua-скриптов.
+
+- Установка начинается с основного манифеста:
+
+```console
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingressnginx/master/deploy/static/provider/cloud/deploy.yaml
+
+namespace/ingress-nginx created
+configmap/nginx-configuration created
+configmap/tcp-services created
+configmap/udp-services created
+serviceaccount/nginx-ingress-serviceaccount created
+clusterrole.rbac.authorization.k8s.io/nginx-ingress-clusterrole created
+role.rbac.authorization.k8s.io/nginx-ingress-role created
+rolebinding.rbac.authorization.k8s.io/nginx-ingress-role-nisa-binding created
+clusterrolebinding.rbac.authorization.k8s.io/nginx-ingress-clusterrole-nisa-binding created
+deployment.apps/nginx-ingress-controller created
+limitrange/ingress-nginx created
+```
+
+- После установки основных компонентов, в [инструкции](https://kubernetes.github.io/ingress-nginx/deploy/#bare-metal) рекомендуется применить манифест, который создаст NodePort -сервис. Но у нас есть MetalLB, мы можем сделать круче.
+
+> Можно сделать просто minikube addons enable ingress , но мы не ищем легких путей
+
+Проверим, что контроллер запустился:
+
+```console
+kubectl get pods -n ingress-nginx
+NAME                                        READY   STATUS    RESTARTS   AGE
+nginx-ingress-controller-5bb8fb4bb6-rvkz5   1/1     Running   0          2m2s
+```
+
+Создадим файл nginx-lb.yaml c конфигурацией LoadBalancer - сервиса (работаем в каталоге kubernetes-networks):
+
+```yml
+kind: Service
+apiVersion: v1
+metadata:
+  name: ingress-nginx
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+spec:
+  externalTrafficPolicy: Local
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: https
+      port: 443
+      targetPort: https
+```
+
+- Теперь применим созданный манифест и посмотрим на IP-адрес, назначенный ему MetalLB
+
+```console
+kubectl get svc -n ingress-nginx
+
+NAME            TYPE           CLUSTER-IP     EXTERNAL-IP    PORT(S)                      AGE
+ingress-nginx   LoadBalancer   10.109.249.5   172.17.255.3   80:30552/TCP,443:30032/TCP   5m13s
+```
+
+- Теперь можно сделать пинг на этот IP-адрес и даже curl
+
+```console
+curl 172.17.255.3
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx/1.17.8</center>
+</body>
+</html>
+```
+
+Видим страничку 404 от Nginx - значит работает!
+
+### Подключение приложение Web к Ingress
+
+- Наш Ingress-контроллер не требует **ClusterIP** для балансировки трафика
+- Список узлов для балансировки заполняется из ресурса Endpoints нужного сервиса (это нужно для "интеллектуальной" балансировки, привязки сессий и т.п.)
+- Поэтому мы можем использовать **headless-сервис** для нашего вебприложения.
+- Скопируем web-svc-cip.yaml в web-svc-headless.yaml
+  - Изменим имя сервиса на **web-svc**
+  - Добавим параметр **clusterIP: None**
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-svc
+spec:
+  selector:
+    app: web
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+```
+
+- Теперь применим полученный манифест и проверим, что ClusterIP для сервиса web-svc действительно не назначен
+
+```console
+kubectl apply -f web-svc-headless.yaml
+service/web-svc created
+
+kubectl get svc
+NAME          TYPE           CLUSTER-IP      EXTERNAL-IP    PORT(S)        AGE
+web-svc       ClusterIP      None            <none>         80/TCP         32s
+```
+
+### Создание правил Ingress
+
+Теперь настроим наш ingress-прокси, создав манифест с ресурсом Ingress (файл назовем web-ingress.yaml):
+
+```yml
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: web
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /web
+        backend:
+          serviceName: web-svc
+          servicePort: 8000
+```
+
+Применим манифест и проверим, что корректно заполнены Address и Backends:
+
+```console
+kubectl apply -f web-ingress.yaml
+ingress.networking.k8s.io/web created
+
+kubectl describe ingress/web
+Name:             web
+Namespace:        default
+Address:          172.17.255.3
+Default backend:  default-http-backend:80 (<none>)
+Rules:
+  Host  Path  Backends
+  ----  ----  --------
+  *
+        /web   web-svc:8000 (172.17.0.5:8000,172.17.0.6:8000,172.17.0.7:8000)
+Annotations:
+  kubectl.kubernetes.io/last-applied-configuration:  {"apiVersion":"networking.k8s.io/v1beta1","kind":"Ingress","metadata":{"annotations":{"nginx.ingress.kubernetes.io/rewrite-target":"/"},"name":"web","namespace":"default"},"spec":{"rules":[{"http":{"paths":[{"backend":{"serviceName":"web-svc","servicePort":8000},"path":"/web"}]}}]}}
+
+  nginx.ingress.kubernetes.io/rewrite-target:  /
+Events:
+  Type    Reason  Age   From                      Message
+  ----    ------  ----  ----                      -------
+  Normal  CREATE  24s   nginx-ingress-controller  Ingress default/web
+  Normal  UPDATE  4s    nginx-ingress-controller  Ingress default/web
+```
+
+- Теперь можно проверить, что страничка доступна в браузере (<http://172.17.255.3/web/index.html)>
+- Обратим внимание, что обращения к странице тоже балансируются между Podами. Только сейчас это происходит средствами nginx, а не IPVS
+
+### Задания со ⭐ | Ingress для Dashboard
+
+Добавим доступ к kubernetes-dashboard через наш Ingress-прокси:
+
+- Cервис должен быть доступен через префикс /dashboard.
+- Kubernetes Dashboard должен быть развернут из официального манифеста. Актуальная ссылка в [репозитории проекта](https://github.com/kubernetes/dashboard).
+- Написанные манифесты положим в подкаталог ./dashboard
+
+```console
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.1/aio/deploy/recommended.yaml
+namespace/kubernetes-dashboard created
+serviceaccount/kubernetes-dashboard created
+service/kubernetes-dashboard created
+secret/kubernetes-dashboard-certs created
+secret/kubernetes-dashboard-csrf created
+secret/kubernetes-dashboard-key-holder created
+configmap/kubernetes-dashboard-settings created
+role.rbac.authorization.k8s.io/kubernetes-dashboard created
+clusterrole.rbac.authorization.k8s.io/kubernetes-dashboard created
+rolebinding.rbac.authorization.k8s.io/kubernetes-dashboard created
+clusterrolebinding.rbac.authorization.k8s.io/kubernetes-dashboard created
+deployment.apps/kubernetes-dashboard created
+service/dashboard-metrics-scraper created
+deployment.apps/dashboard-metrics-scraper created
+```
+
+dashboard-ingress.yaml
+
+```yml
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: dashboard
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+  namespace: kubernetes-dashboard
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /dashboard(/|$)(.*)
+        backend:
+          serviceName: kubernetes-dashboard
+          servicePort: 443
+```
+
+> Аннотация **nginx.ingress.kubernetes.io/rewrite-target** перезаписывает URL-адрес перед отправкой запроса на бэкэнд подов.  
+> В /dashboard(/|$)(.*\) для пути (. \*) хранится динамический URL, который генерируется при доступе к Kubernetes Dashboard.  
+> Аннотация **nginx.ingress.kubernetes.io/rewrite-target** заменяет захваченные данные в URL-адресе перед отправкой запроса в сервис kubernetes-dashboard
+
+Применим наш манифест:
+
+```console
+kubectl apply -f dashboard-ingress.yaml
+ingress.extensions/dashboard configured
+
+kubectl get ingress -n kubernetes-dashboard
+NAME        CLASS    HOSTS   ADDRESS        PORTS   AGE
+dashboard   <none>   *       172.17.255.3   80      12h
+```
+
+Проверим работоспособность по ссылке: <https://172.17.255.3/dashboard/>
+
+### Задания со ⭐ | Canary для Ingress
+
+Реализуем канареечное развертывание с помощью ingress-nginx:
+
+- Перенаправление части трафика на выделенную группу подов должно происходить по HTTP-заголовку.
+- Документация [тут](https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#canary)
+- Естественно, что нам понадобятся 1-2 "канареечных" пода. Написанные манифесты положим в подкаталог ./canary
+
+Пишем манифесты для:
+
+- namespace canary-ns.yaml
+- deployment canary-deploy.yaml
+- service canary-svc-headless.yaml
+- ingress canary-ingress.yml
+
+```yml
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: web
+  namespace: canary
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target:  /
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-by-header: "canary"
+spec:
+  rules:
+  - host: app.local
+    http:
+      paths:
+      - path: /web
+        backend:
+          serviceName: web-svc
+          servicePort: 8000
+```
+
+И применяем:
+
+```console
+kubectl apply -f .
+namespace/canary unchanged
+deployment.apps/web created
+service/web-svc created
+ingress.networking.k8s.io/web created
+```
+
+> Так же придется впиcать **host: app.local** (к примеру) в манифест web-ingress.yaml  
+> иначе на ingress контроллере валится ошибка: **cannot merge alternative backend canary-web-svc-8000 into hostname  that does not exist**
+
+Запоминаем названия pods:
+
+```console
+kubectl get pods
+NAME                   READY   STATUS    RESTARTS   AGE
+web-6596d967d4-fw9px   1/1     Running   0          3h4m
+web-6596d967d4-pd65t   1/1     Running   0          3h4m
+web-6596d967d4-znkmv   1/1     Running   0          3h4m
+
+kubectl get pods -n canary
+NAME                   READY   STATUS    RESTARTS   AGE
+web-54c8466885-f8nn6   1/1     Running   0          93m
+web-54c8466885-gtk6x   1/1     Running   0          93m
+```
+
+И проверяем работу:
+
+```console
+curl -s -H "Host: app.local" http://172.17.255.2/web/index.html | grep "HOSTNAME"
+export HOSTNAME='web-6596d967d4-fw9px'
+
+curl -s -H "Host: app.local" -H "canary: always" http://172.17.255.2/web/index.html | grep "HOSTNAME"
+export HOSTNAME='web-54c8466885-f8nn6'
+```
+
 ## Security
 
 ### task01
@@ -382,7 +1748,7 @@ docker push kovtalex/hipster-frontend:v0.0.2
 ```
 
 - Обновим в манифесте версию образа
-- Применим новый манифест, параллельно запустите отслеживание происходящего:
+- Применим новый манифест, параллельно запустим отслеживание происходящего:
 
 ```console
 kubectl apply -f frontend-replicaset.yaml | kubectl get pods -l app=frontend -w
