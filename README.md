@@ -403,7 +403,7 @@ kubectl apply -f web-svc-cip.yaml
 service/web-svc-cip created
 ```
 
-- Проверим результат (отметьте назначенный CLUSTER-IP):
+- Проверим результат (отметим назначенный CLUSTER-IP):
 
 ```console
 kubectl get svc
@@ -780,7 +780,7 @@ ip addr show kube-ipvs0
        valid_lft forever preferred_lft forever
 ```
 
-> Также, правила в iptables построены по-другому. Вместо цепочки правил для каждого сервиса, теперь используются хэш-таблицы (ipset). Можете посмотреть их, установив утилиту ipset в toolbox .
+> Также, правила в iptables построены по-другому. Вместо цепочки правил для каждого сервиса, теперь используются хэш-таблицы (ipset). Можем посмотреть их, установив утилиту ipset в toolbox .
 
 ```console
 ipset list
@@ -1299,6 +1299,73 @@ dashboard   <none>   *       172.17.255.3   80      12h
 - Документация [тут](https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#canary)
 - Естественно, что нам понадобятся 1-2 "канареечных" пода. Написанные манифесты положим в подкаталог ./canary
 
+Пишем манифесты для:
+
+- namespace canary-ns.yaml
+- deployment canary-deploy.yaml
+- service canary-svc-headless.yaml
+- ingress canary-ingress.yml
+
+```yml
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: web
+  namespace: canary
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target:  /
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-by-header: "canary"
+spec:
+  rules:
+  - host: app.local
+    http:
+      paths:
+      - path: /web
+        backend:
+          serviceName: web-svc
+          servicePort: 8000
+```
+
+И применяем:
+
+```console
+kubectl apply -f .
+namespace/canary unchanged
+deployment.apps/web created
+service/web-svc created
+ingress.networking.k8s.io/web created
+```
+
+> Так же придется впиcать **host: app.local** (к примеру) в манифест web-ingress.yaml  
+> иначе на ingress контроллере валится ошибка: **cannot merge alternative backend canary-web-svc-8000 into hostname  that does not exist**
+
+Запоминаем названия pods:
+
+```console
+kubectl get pods
+NAME                   READY   STATUS    RESTARTS   AGE
+web-6596d967d4-fw9px   1/1     Running   0          3h4m
+web-6596d967d4-pd65t   1/1     Running   0          3h4m
+web-6596d967d4-znkmv   1/1     Running   0          3h4m
+
+kubectl get pods -n canary
+NAME                   READY   STATUS    RESTARTS   AGE
+web-54c8466885-f8nn6   1/1     Running   0          93m
+web-54c8466885-gtk6x   1/1     Running   0          93m
+```
+
+И проверяем работу:
+
+```console
+curl -s -H "Host: app.local" http://172.17.255.2/web/index.html | grep "HOSTNAME"
+export HOSTNAME='web-6596d967d4-fw9px'
+
+curl -s -H "Host: app.local" -H "canary: always" http://172.17.255.2/web/index.html | grep "HOSTNAME"
+export HOSTNAME='web-54c8466885-f8nn6'
+```
+
 ## Security
 
 ### task01
@@ -1681,7 +1748,7 @@ docker push kovtalex/hipster-frontend:v0.0.2
 ```
 
 - Обновим в манифесте версию образа
-- Применим новый манифест, параллельно запустите отслеживание происходящего:
+- Применим новый манифест, параллельно запустим отслеживание происходящего:
 
 ```console
 kubectl apply -f frontend-replicaset.yaml | kubectl get pods -l app=frontend -w
