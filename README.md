@@ -125,7 +125,7 @@ spec:
     spec: # Описание Pod
       containers: # Описание контейнеров внутри Pod
       - name: web # Название контейнера
-        image: kovtalex/simple-web:0.2 # Образ из которого создается контейнер
+        image: kovtalex/simple-web:0.1 # Образ из которого создается контейнер
         readinessProbe:
           httpGet:
             path: /index.html
@@ -203,7 +203,7 @@ spec:
     spec: # Описание Pod
       containers: # Описание контейнеров внутри Pod
       - name: web # Название контейнера
-        image: kovtalex/simple-web:0.2 # Образ из которого создается контейнер
+        image: kovtalex/simple-web:0.1 # Образ из которого создается контейнер
         readinessProbe:
           httpGet:
             path: /index.html
