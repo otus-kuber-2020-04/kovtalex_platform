@@ -1,5 +1,316 @@
 # kovtalex_platform
 
+## Volumes, Storages, StatefulSet
+
+### Установка и запуск kind
+
+**kind** - инструмент для запуска Kuberenetes при помощи Docker контейнеров.
+
+Запуск: kind create cluster
+
+### Применение StatefulSet
+
+В этом ДЗ мы развернем StatefulSet c [MinIO](https://min.io/) - локальным S3 хранилищем.
+
+Конфигурация [StatefulSet](https://raw.githubusercontent.com/express42/otus-platform-snippets/master/Module-02/Kuberenetes-volumes/minio-statefulset.yaml).
+
+minio-statefulset.yaml
+
+```yml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  # This name uniquely identifies the StatefulSet
+  name: minio
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio # has to match .spec.template.metadata.labels
+  template:
+    metadata:
+      labels:
+        app: minio # has to match .spec.selector.matchLabels
+    spec:
+      containers:
+      - name: minio
+        env:
+        - name: MINIO_ACCESS_KEY
+          value: "minio"
+        - name: MINIO_SECRET_KEY
+          value: "minio123"
+        image: minio/minio:RELEASE.2019-07-10T00-34-56Z
+        args:
+        - server
+        - /data 
+        ports:
+        - containerPort: 9000
+        # These volume mounts are persistent. Each pod in the PetSet
+        # gets a volume mounted based on this field.
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        # Liveness probe detects situations where MinIO server instance
+        # is not working properly and needs restart. Kubernetes automatically
+        # restarts the pods if liveness checks fail.
+        livenessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          initialDelaySeconds: 120
+          periodSeconds: 20
+  # These are converted to volume claims by the controller
+  # and mounted at the paths mentioned above. 
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+```
+
+### Применение Headless Service
+
+Для того, чтобы наш StatefulSet был доступен изнутри кластера, создадим [Headless Service](https://raw.githubusercontent.com/express42/otus-platform-snippets/master/Module-02/Kuberenetes-volumes/minio-headless-service.yaml).
+
+minio-headless-service.yaml
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels:
+    app: minio
+spec:
+  clusterIP: None
+  ports:
+    - port: 9000
+      name: minio
+  selector:
+    app: minio
+```
+
+В результате применения конфигурации должно произойти следующее:
+
+- Запуститься под с MinIO
+- Создаться PVC
+- Динамически создаться PV на этом PVC с помощью дефолотного StorageClass
+
+```console
+kubectl apply -f minio-statefulset.yaml
+statefulset.apps/minio created
+
+kubectl apply -f minio-headless-service.yaml
+service/minio created
+```
+
+### Проверка работы MinIO
+
+Создадим сервис LB:
+
+minio-svc-lb.yaml
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-svc-lb
+spec:
+  selector:
+    app: minio
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 9000
+      targetPort: 9000
+```
+
+- Проверить работу Minio можно с помощью консольного клиента [mc](https://github.com/minio/mc)
+
+```console
+mc config host add minio http://172.17.255.1:9000 minio minio123
+Added `minio` successfully.
+```
+
+- Проверить работу Minio можно с помощью браузера: <http://172.17.255.1:9000/minio/>
+
+Также для проверки ресурсов k8s помогут команды:
+
+```console
+kubectl get statefulsets
+kubectl get pods
+kubectl get pvc
+kubectl get pv
+kubectl describe <resource> <resource_name>
+```
+
+```console
+kubectl get statefulsets
+NAME    READY   AGE
+minio   1/1     10h
+```
+
+```console
+kubectl get pods
+NAME      READY   STATUS    RESTARTS   AGE
+minio-0   1/1     Running   0          10h
+```
+
+```console
+kubectl get pvc
+NAME           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+data-minio-0   Bound    pvc-905bcd19-8e21-41a3-902b-a75a80b2c4dc   10Gi       RWO            standard       10h
+```
+
+```console
+kubectl get pv
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM                  STORAGECLASS   REASON   AGE
+pvc-30f9d611-009d-4b70-90c1-4eee8b707cfe   10Gi       RWO            Delete           Bound    default/data-minio-0   standard                7h7m
+```
+
+### Задание со ⭐
+
+В конфигурации нашего StatefulSet данные указаны в открытом виде, что не безопасно.  
+Поместим данные в [secrets](https://kubernetes.io/docs/concepts/configuration/secret/) и настроим конфигурацию на их использование.
+
+Конвертируем username и password в base64:
+
+```console
+echo -n 'minio' | base64
+bWluaW8=
+
+echo -n 'minio123' | base64
+bWluaW8xMjM=
+```
+
+Подготовим манифест с Secret:
+
+```yml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio
+type: Opaque
+data:
+  username: bWluaW8=
+  password: bWluaW8xMjM=
+```
+
+Изменим minio-headless-service.yaml для использования нашего Secret:
+
+```yml
+        env:
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio
+              key: username
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio
+              key: password
+```
+
+Применим изменения:
+
+```console
+kubectl apply -f minio-statefulset.yaml
+statefulset.apps/minio configured
+secret/minio created
+```
+
+Посмотрим на Secret:
+
+```console
+kubectl get secret minio -o yaml
+apiVersion: v1
+data:
+  password: bWluaW8xMjM=
+  username: bWluaW8=
+kind: Secret
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","data":{"password":"bWluaW8xMjM=","username":"bWluaW8="},"kind":"Secret","metadata":{"annotations":{},"name":"minio","namespace":"default"},"type":"Opaque"}
+  creationTimestamp: "2020-05-23T12:33:55Z"
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:data:
+        .: {}
+        f:password: {}
+        f:username: {}
+      f:metadata:
+        f:annotations:
+          .: {}
+          f:kubectl.kubernetes.io/last-applied-configuration: {}
+      f:type: {}
+    manager: kubectl
+    operation: Update
+    time: "2020-05-23T12:33:55Z"
+  name: minio
+  namespace: default
+  resourceVersion: "19218"
+  selfLink: /api/v1/namespaces/default/secrets/minio
+  uid: 87e39a34-4a5b-40c0-a4b9-5181b0a3cb34
+type: Opaque
+```
+
+```console
+kubectl describe statefulsets minio
+Name:               minio
+Namespace:          default
+CreationTimestamp:  Fri, 22 May 2020 23:38:47 +0300
+Selector:           app=minio
+Labels:             <none>
+Annotations:        kubectl.kubernetes.io/last-applied-configuration:
+                      {"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"annotations":{},"name":"minio","namespace":"default"},"spec":{"replicas":1,"sele...
+Replicas:           1 desired | 1 total
+Update Strategy:    RollingUpdate
+  Partition:        824642936636
+Pods Status:        1 Running / 0 Waiting / 0 Succeeded / 0 Failed
+Pod Template:
+  Labels:  app=minio
+  Containers:
+   minio:
+    Image:      minio/minio:RELEASE.2019-07-10T00-34-56Z
+    Port:       9000/TCP
+    Host Port:  0/TCP
+    Args:
+      server
+      /data
+    Liveness:  http-get http://:9000/minio/health/live delay=120s timeout=1s period=20s #success=1 #failure=3
+    Environment:
+      MINIO_ACCESS_KEY:  minio
+      MINIO_SECRET_KEY:  minio123
+    Mounts:
+      /data from data (rw)
+  Volumes:  <none>
+Volume Claims:
+  Name:          data
+  StorageClass:  
+  Labels:        <none>
+  Annotations:   <none>
+  Capacity:      10Gi
+  Access Modes:  [ReadWriteOnce]
+Events:
+  Type    Reason            Age   From                    Message
+  ----    ------            ----  ----                    -------
+  Normal  SuccessfulCreate  11h   statefulset-controller  create Claim data-minio-0 Pod minio-0 in StatefulSet minio success
+  Normal  SuccessfulCreate  11h   statefulset-controller  create Pod minio-0 in StatefulSet minio successful
+```
+
+## Удаление кластера
+
+Удалить кластер можно командой: kind delete cluster
+
 ## Сетевое взаимодействие Pod, сервисы
 
 ### Добавление проверок Pod
@@ -813,11 +1124,9 @@ Members:
 MetalLB позволяет запустить внутри кластера L4-балансировщик, который будет принимать извне запросы к сервисам и раскидывать их между подами. Установка его проста:
 
 ```console
-kubectl apply -f
-https://raw.githubusercontent.com/metallb/metallb/v0.9.3/manifests/namespace.yaml
-kubectl apply -f
-https://raw.githubusercontent.com/metallb/metallb/v0.9.3/manifests/metallb.yaml
-kubectl create secret generic -n metallb-system memberlist --fromliteral=secretkey="$(openssl rand -base64 128)"
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.9.3/manifests/namespace.yaml
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.9.3/manifests/metallb.yaml
+kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey="$(openssl rand -base64 128)"
 ```
 
 > ❗ В продуктиве так делать не надо. Сначала стоит скачать файл и разобраться, что там внутри
