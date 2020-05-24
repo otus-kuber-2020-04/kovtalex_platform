@@ -201,7 +201,7 @@ data:
   password: bWluaW8xMjM=
 ```
 
-Изменим minio-headlessservice.yaml для использования нашего Secret:
+Изменим minio-headless-service.yaml для использования нашего Secret:
 
 ```yml
         env:
