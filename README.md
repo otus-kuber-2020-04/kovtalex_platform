@@ -77,7 +77,7 @@ spec:
 
 Для того, чтобы наш StatefulSet был доступен изнутри кластера, создадим [Headless Service](https://raw.githubusercontent.com/express42/otus-platform-snippets/master/Module-02/Kuberenetes-volumes/minio-headless-service.yaml).
 
-minio-headlessservice.yaml
+minio-headless-service.yaml
 
 ```yml
 apiVersion: v1
@@ -105,7 +105,7 @@ spec:
 kubectl apply -f minio-statefulset.yaml
 statefulset.apps/minio created
 
-kubectl apply -f minio-headlessservice.yaml
+kubectl apply -f minio-headless-service.yaml
 service/minio created
 ```
 
@@ -173,7 +173,7 @@ NAME                                       CAPACITY   ACCESS MODES   RECLAIM POL
 pvc-30f9d611-009d-4b70-90c1-4eee8b707cfe   10Gi       RWO            Delete           Bound    default/data-minio-0   standard                7h7m
 ```
 
-### Задание со *
+### Задание со ⭐
 
 В конфигурации нашего StatefulSet данные указаны в открытом виде, что не безопасно.  
 Поместим данные в [secrets](https://kubernetes.io/docs/concepts/configuration/secret/) и настроим конфигурацию на их использование.
