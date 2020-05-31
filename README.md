@@ -1,5 +1,2356 @@
 # kovtalex_platform
 
+## Шаблонизация манифестов Kubernetes
+
+### Intro
+
+Домашнее задание выполняем в GKE кластере.  
+Для доступа к Google Cloud Platform нужно активировать триальный аккаунт в GCP.
+
+[Официальная документация](https://cloud.google.com/kubernetes-engine/)
+
+```console
+gcloud container clusters get-credentials cluster-1 --zone europe-west1-b --project angular-pursuit-275120
+etching cluster endpoint and auth data.
+kubeconfig entry generated for cluster1.
+```
+
+### Устанавливаем готовые Helm charts
+
+Попробуем установить Helm charts созданные сообществом. С их помощью создадим и настроим инфраструктурные сервисы, необходимые для работы нашего кластера.
+
+Для установки будем использовать **Helm 3**.
+
+Сегодня будем работать со следующими сервисами:
+
+- [nginx-ingress](https://github.com/helm/charts/tree/master/stable/nginx-ingress) - сервис, обеспечивающий доступ к публичным ресурсам кластера
+- [cert-manager](https://github.com/jetstack/cert-manager/tree/master/deploy/charts/cert-manager) - сервис, позволяющий динамически генерировать Let's Encrypt сертификаты для ingress ресурсов
+- [chartmuseum](https://github.com/helm/charts/tree/master/stable/chartmuseum) - специализированный репозиторий для хранения helm charts
+- [harbor](https://github.com/goharbor/harbor-helm) - хранилище артефактов общего назначения (Docker Registry), поддерживающее helm charts
+
+### Установка Helm 3
+
+Для начала нам необходимо установить **Helm 3** на локальную машину.  
+Инструкции по установке можно найти по [ссылке](https://github.com/helm/helm#install).
+
+```console
+brew install helm
+```
+
+Критерий успешности установки - после выполнения команды вывод:
+
+```console
+helm version
+version.BuildInfo{Version:"v3.2.1", GitCommit:"fe51cd1e31e6a202cba7dead9552a6d418ded79a", GitTreeState:"clean", GoVersion:"go1.13.10"}
+```
+
+### Памятка по использованию Helm
+
+Создание **release**:
+
+```console
+helm install <chart_name> --name=<release_name> --namespace=<namespace>
+kubectl get secrets -n <namespace> | grep <release_name>
+```
+
+Обновление **release**:
+
+```console
+helm upgrade <release_name> <chart_name> --namespace=<namespace>
+kubectl get secrets -n <namespace> | grep <release_name>
+```
+
+Создание или обновление **release**:
+
+```console
+helm upgrade --install <release_name> <chart_name> --namespace=<namespace>
+kubectl get secrets -n <namespace> | grep <release_name>
+```
+
+### Add helm repo
+
+Добавим репозиторий stable
+
+По умолчанию в **Helm 3** не установлен репозиторий stable
+
+```console
+helm repo add stable https://kubernetes-charts.storage.googleapis.com
+"stable" has been added to your repositories
+
+helm repo list
+NAME    URL
+stable  https://kubernetes-charts.storage.googleapis.com
+```
+
+### nginx-ingress
+
+Создадим *namespace* и **release** [nginx-ingress](https://cert-manager.io/next-docs/installation/kubernetes/)
+
+```console
+kubectl create ns nginx-ingress
+namespace/nginx-ingress created
+
+helm upgrade --install nginx-ingress stable/nginx-ingress --wait \
+--namespace=nginx-ingress \
+--version=1.39.0
+
+
+Release "nginx-ingress" does not exist. Installing it now.
+NAME: nginx-ingress
+LAST DEPLOYED: Wed May 27 22:15:54 2020
+NAMESPACE: nginx-ingress
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+The nginx-ingress controller has been installed.
+It may take a few minutes for the LoadBalancer IP to be available.
+You can watch the status by running 'kubectl --namespace nginx-ingress get services -o wide -w nginx-ingress-controller'
+
+An example Ingress that makes use of the controller:
+
+  apiVersion: extensions/v1beta1
+  kind: Ingress
+  metadata:
+    annotations:
+      kubernetes.io/ingress.class: nginx
+    name: example
+    namespace: foo
+  spec:
+    rules:
+      - host: www.example.com
+        http:
+          paths:
+            - backend:
+                serviceName: exampleService
+                servicePort: 80
+              path: /
+    # This section is only required if TLS is to be enabled for the Ingress
+    tls:
+        - hosts:
+            - www.example.com
+          secretName: example-tls
+
+If TLS is enabled for the Ingress, a Secret containing the certificate and key must also be provided:
+
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: example-tls
+    namespace: foo
+  data:
+    tls.crt: <base64 encoded cert>
+    tls.key: <base64 encod
+```
+
+Разберем используемые ключи:
+
+- **--wait** - ожидать успешного окончания установки ([подробности](https://helm.sh/docs/using_helm/#helpful-options-for-install-upgrade-rollback))
+- **--timeout** - считать установку неуспешной по истечении указанного времени
+- **--namespace** - установить chart в определенный namespace (если не существует, необходимо создать)
+- **--version** - установить определенную версию chart
+
+### cert-manager
+
+Добавим репозиторий, в котором хранится актуальный helm chart cert-manager:
+
+```console
+helm repo add jetstack https://charts.jetstack.io
+"jetstack" has been added to your repositories
+
+helm repo update
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "jetstack" chart repository
+...Successfully got an update from the "stable" chart repository
+Update Complete. ⎈ Happy Helming!⎈
+```
+
+Создадим namespace
+
+```console
+kubectl create namespace cert-manager
+namespace/cert-manager created
+```
+
+Также для установки cert-manager предварительно потребуется создать в кластере некоторые **CRD**:
+
+```console
+kubectl apply --validate=false -f https://github.com/jetstack/cert-manager/releases/download/v0.15.0/cert-manager.crds.yaml
+customresourcedefinition.apiextensions.k8s.io/certificaterequests.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/certificates.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/challenges.acme.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/clusterissuers.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/issuers.cert-manager.io created
+customresourcedefinition.apiextensions.k8s.io/orders.acme.cert-manager.io created
+```
+
+Установим cert-manager:
+
+```console
+helm install cert-manager jetstack/cert-manager --namespace cert-manager --version v0.15.1
+
+NAME: cert-manager
+LAST DEPLOYED: Wed May 27 22:19:16 2020
+NAMESPACE: cert-manager
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+cert-manager has been deployed successfully!
+
+In order to begin issuing certificates, you will need to set up a ClusterIssuer
+or Issuer resource (for example, by creating a 'letsencrypt-staging' issuer).
+
+More information on the different types of issuers and how to configure them
+can be found in our documentation:
+
+https://cert-manager.io/docs/configuration/
+
+For information on how to configure cert-manager to automatically provision
+Certificates for Ingress resources, take a look at the `ingress-shim`
+documentation:
+
+https://cert-manager.io/docs/usage/ingress/
+```
+
+Проверим, что cert-manager успешно развернут и работает:
+
+```console
+kubectl get pods --namespace cert-manager
+
+NAME                                       READY   STATUS    RESTARTS   AGE
+cert-manager-766d5c494b-d9mkq              1/1     Running   0          14s
+cert-manager-cainjector-6649bbb695-cpk46   1/1     Running   0          14s
+cert-manager-webhook-68d464c8b-9mfpv       1/1     Running   0          14s
+
+cat <<EOF > test-resources.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager-test
+---
+apiVersion: cert-manager.io/v1alpha2
+kind: Issuer
+metadata:
+  name: test-selfsigned
+  namespace: cert-manager-test
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: selfsigned-cert
+  namespace: cert-manager-test
+spec:
+  dnsNames:
+    - example.com
+  secretName: selfsigned-cert-tls
+  issuerRef:
+
+
+kubectl apply -f test-resources.yaml
+namespace/cert-manager-test created
+issuer.cert-manager.io/test-selfsigned created
+certificate.cert-manager.io/selfsigned-cert created
+
+
+kubectl describe certificate -n cert-manager-test
+
+Name:         selfsigned-cert
+Namespace:    cert-manager-test
+Labels:       <none>
+Annotations:  kubectl.kubernetes.io/last-applied-configuration:
+                {"apiVersion":"cert-manager.io/v1alpha2","kind":"Certificate","metadata":{"annotations":{},"name":"selfsigned-cert","namespace":"cert-mana...
+API Version:  cert-manager.io/v1alpha3
+Kind:         Certificate
+Metadata:
+  Creation Timestamp:  2020-05-27T19:20:40Z
+  Generation:          1
+  Resource Version:    3879
+  Self Link:           /apis/cert-manager.io/v1alpha3/namespaces/cert-manager-test/certificates/selfsigned-cert
+  UID:                 2166b2f3-faf7-4fe5-a9e4-410f4540effc
+Spec:
+  Dns Names:
+    example.com
+  Issuer Ref:
+    Name:       test-selfsigned
+  Secret Name:  selfsigned-cert-tls
+Status:
+  Conditions:
+    Last Transition Time:  2020-05-27T19:20:41Z
+    Message:               Certificate is up to date and has not expired
+    Reason:                Ready
+    Status:                True
+    Type:                  Ready
+  Not After:               2020-08-25T19:20:41Z
+Events:
+  Type    Reason        Age   From          Message
+  ----    ------        ----  ----          -------
+  Normal  GeneratedKey  11s   cert-manager  Generated a new private key
+  Normal  Requested     11s   cert-manager  Created new CertificateRequest resource "selfsigned-cert-504566127"
+  Normal  Issued        11s   cert-manager  Certificate issued successfully
+
+
+kubectl delete -f test-resources.yaml
+namespace "cert-manager-test" deleted
+issuer.cert-manager.io "test-selfsigned" deleted
+```
+
+### cert-manager | Самостоятельное задание
+
+Для выпуска сертификатов нам потребуются ClusterIssuers. Создадим их для staging и production окружений.
+
+cluster-issuer-prod.yaml:
+
+```yml
+apiVersion: cert-manager.io/v1alpha2
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: kovtalex@gmail.com
+    privateKeySecretRef:
+      name: letsencrypt-production
+    solvers:
+    - http01:
+        ingress:
+          class:  nginx
+```
+
+cluster-issuer-stage.yaml:
+
+```yml
+apiVersion: cert-manager.io/v1alpha2
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: kovtalex@gmail.com
+    privateKeySecretRef:
+      name: letsencrypt-staging
+    solvers:
+    - http01:
+        ingress:
+          class:  nginx
+```
+
+Проверим статус:
+
+```console
+kubectl describe clusterissuers -n cert-manager
+Name:         letsencrypt-production
+Namespace:
+Labels:       app=raw
+              app.kubernetes.io/managed-by=Helm
+              chart=raw-0.2.3
+              heritage=Helm
+              release=cert-manager-issuers
+Annotations:  meta.helm.sh/release-name: cert-manager-issuers
+              meta.helm.sh/release-namespace: cert-manager
+API Version:  cert-manager.io/v1alpha3
+Kind:         ClusterIssuer
+Metadata:
+  Creation Timestamp:  2020-05-30T17:09:38Z
+  Generation:          1
+  Resource Version:    1274031
+  Self Link:           /apis/cert-manager.io/v1alpha3/clusterissuers/letsencrypt-production
+  UID:                 6491edb5-382c-48a9-bc92-a000342dc334
+Spec:
+  Acme:
+    Email:  kovtalex@gmail.com
+    Private Key Secret Ref:
+      Name:  letsencrypt-production
+    Server:  https://acme-v02.api.letsencrypt.org/directory
+    Solvers:
+      http01:
+        Ingress:
+          Class:  nginx
+Status:
+  Acme:
+    Last Registered Email:  kovtalex@gmail.com
+    Uri:                    https://acme-v02.api.letsencrypt.org/acme/acct/87525196
+  Conditions:
+    Last Transition Time:  2020-05-30T17:09:47Z
+    Message:               The ACME account was registered with the ACME server
+    Reason:                ACMEAccountRegistered
+    Status:                True
+    Type:                  Ready
+Events:                    <none>
+
+
+Name:         letsencrypt-staging
+Namespace:
+Labels:       app=raw
+              app.kubernetes.io/managed-by=Helm
+              chart=raw-0.2.3
+              heritage=Helm
+              release=cert-manager-issuers
+Annotations:  meta.helm.sh/release-name: cert-manager-issuers
+              meta.helm.sh/release-namespace: cert-manager
+API Version:  cert-manager.io/v1alpha3
+Kind:         ClusterIssuer
+Metadata:
+  Creation Timestamp:  2020-05-30T17:09:38Z
+  Generation:          1
+  Resource Version:    1274029
+  Self Link:           /apis/cert-manager.io/v1alpha3/clusterissuers/letsencrypt-staging
+  UID:                 29366949-a45a-458f-bea1-95d7cd74773a
+Spec:
+  Acme:
+    Email:  kovtalex@gmail.com
+    Private Key Secret Ref:
+      Name:  letsencrypt-staging
+    Server:  https://acme-staging-v02.api.letsencrypt.org/directory
+    Solvers:
+      http01:
+        Ingress:
+          Class:  nginx
+Status:
+  Acme:
+    Last Registered Email:  kovtalex@gmail.com
+    Uri:                    https://acme-staging-v02.api.letsencrypt.org/acme/acct/13939356
+  Conditions:
+    Last Transition Time:  2020-05-30T17:09:47Z
+    Message:               The ACME account was registered with the ACME server
+    Reason:                ACMEAccountRegistered
+    Status:                True
+    Type:                  Ready
+Events:                    <none>
+```
+
+### chartmuseum
+
+Кастомизируем установку chartmuseum
+
+- Создадим директорию kubernetes-templating/chartmuseum/ и поместим туда файл values.yaml
+- Изучим [содержимое](https://github.com/helm/charts/blob/master/stable/chartmuseum/values.yaml) оригинальный файла values.yaml
+- Включим:
+  - Создание ingress ресурса с корректным hosts.name (должен использоваться nginx-ingress)
+  - Автоматическую генерацию Let's Encrypt сертификата
+
+<https://github.com/helm/charts/tree/master/stable/chartmuseum>
+
+Файл values.yaml для chartmuseum будет выглядеть следующим образом:
+
+```yml
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-production"
+  hosts:
+    - name: chartmuseum.35.189.202.237.nip.io
+      path: /
+      tls: true
+      tlsSecret: chartmuseum.35.189.202.237.nip.io
+securityContext: {}
+env:
+  open:
+    DISABLE_API: false
+```
+
+Установим chartmuseum:
+
+```console
+kubectl create ns chartmuseum
+namespace/chartmuseum created
+
+helm upgrade --install chartmuseum stable/chartmuseum --wait --version=2.13.0  --namespace=chartmuseum -f kubernetes-templating/chartmuseum/values.yaml
+Release "chartmuseum" has been upgraded. Happy Helming!
+NAME: chartmuseum
+LAST DEPLOYED: Thu May 28 14:24:55 2020
+NAMESPACE: chartmuseum
+STATUS: deployed
+REVISION: 3
+TEST SUITE: None
+NOTES:
+** Please be patient while the chart is being deployed **
+
+Get the ChartMuseum URL by running:
+
+  export POD_NAME=$(kubectl get pods --namespace chartmuseum -l "app=chartmuseum" -l "release=chartmuseum" -o jsonpath="{.items[0].metadata.name}")
+  echo http://127.0.0.1:8080/
+  kubectl port-forward $POD_NAME 8080:8080 --namespace chartmuseum
+```
+
+Проверим, что release chartmuseum установился:
+
+```console
+helm ls -n chartmuseum
+NAME            NAMESPACE       REVISION        UPDATED                                 STATUS          CHART                   APP VERSION
+chartmuseum     chartmuseum     1               2020-05-27 22:23:39.234698 +0300 MSK    deployed        chartmuseum-2.13.0      0.12.0
+```
+
+- **helm 2** хранил информацию о релизе в configMap'ах (kubectl get configmaps -n kube-system)
+- **Helm 3** хранит информацию в secrets (kubectl get secrets - n chartmuseum)
+
+```console
+kubectl get secrets -n chartmuseum
+
+NAME                                TYPE                                  DATA   AGE
+chartmuseum-chartmuseum             Opaque                                0      9m17s
+chartmuseum.35.189.202.237.nip.io   kubernetes.io/tls                     3      9m16s
+default-token-cxhw9                 kubernetes.io/service-account-token   3      9m25s
+sh.helm.release.v1.chartmuseum.v1   helm.sh/release.v1                    1      9m17s
+```
+
+Проверяем: <https://chartmuseum.35.240.96.124.nip.io>
+
+### chartmuseum | Задание со ⭐
+
+Научимся работать с chartmuseum и зальем в наш репозиторий - примеру frontend
+
+- Добавяем наш репозитарий
+
+```console
+helm repo add chartmuseum https://chartmuseum.35.189.202.237.nip.io/
+"chartmuseum" has been added to your repositories
+```
+
+- Проверяем линтером
+
+```console
+helm lint
+==> Linting .
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+```
+
+- Пакуем
+
+```consol
+helm package .
+Successfully packaged chart and saved it to: /Users/alexey/kovtalex_platform/kubernetes-templating/frontend/frontend-0.1.0.tgz
+```
+
+- Заливаем
+
+```console
+curl -L --data-binary "@frontend-0.1.0.tgz" https://chartmuseum.35.189.202.237.nip.io/api/charts
+{"saved":true}
+```
+
+- Обновляем список repo
+
+```console
+helm repo update
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "harbor" chart repository
+...Successfully got an update from the "chartmuseum" chart repository
+...Successfully got an update from the "templating" chart repository
+...Successfully got an update from the "jetstack" chart repository
+...Successfully got an update from the "stable" chart repository
+Update Complete. ⎈ Happy Helming!⎈
+```
+
+- Ищем наш frontend в репозитории
+
+```console
+helm search repo -l chartmuseum/
+NAME                    CHART VERSION   APP VERSION     DESCRIPTION
+chartmuseum/frontend    0.1.0           1.16.0          A Helm chart for Kubernetes
+```
+
+- И выкатываем
+
+```console
+helm upgrade --install frontend chartmuseum/frontend --namespace hipster-shop
+Release "frontend" does not exist. Installing it now.
+NAME: frontend
+LAST DEPLOYED: Sat May 30 01:59:17 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+```
+
+### Harbor
+
+Установим [Harbor](https://github.com/goharbor/harbor-helm)
+
+- Пишем values.yaml
+
+```yml
+ expose:
+  type: ingress
+  tls:
+    enables: true
+    secretName: harbor.35.189.202.237.nip.io
+    notarySecretName: notary.35.189.202.237.nip.io
+  ingress:
+    hosts:
+      core: harbor.35.189.202.237.nip.io
+    annotations:
+      kubernetes.io/ingress.class: "nginx"
+      cert-manager.io/cluster-issuer: "letsencrypt-production"
+notary:
+  enabled: false
+```
+
+- Добавляем repo
+
+```console
+helm repo add harbor https://helm.goharbor.io
+"harbor" has been added to your repositories
+````
+
+- Обновляем repo
+
+```console
+helm repo update
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "harbor" chart repository
+...Successfully got an update from the "jetstack" chart repository
+...Successfully got an update from the
+```
+
+- Создаем ns
+
+```console
+kubectl create ns harbor
+namespace/harbor created
+```
+
+- Выкатывем
+
+```console
+helm upgrade --install harbor harbor/harbor --wait --namespace=harbor-system --version=1.3.2 -f kubernetes-templating/harbor/values.yaml
+Release "harbor" does not exist. Installing it now.
+NAME: harbor
+LAST DEPLOYED: Thu May 28 23:35:35 2020
+NAMESPACE: harbor-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Please wait for several minutes for Harbor deployment to complete.
+Then you should be able to visit the Harbor portal at https://core.harbor.domain.
+For more details, please visit https://github.com/goharbor/harbor.
+```
+
+#### Tips & Tricks
+
+- Формат описания переменных в файле values.yaml для **chartmuseum** и **harbor** отличается
+- Helm3 не создает namespace в который будет установлен release
+- Проще выключить сервис **notary**, он нам не понадобится
+- Реквизиты по умолчанию - **admin/Harbor12345**
+- nip.io может оказаться забанен в cert-manager. Если у вас есть собственный домен - лучше использовать его, либо попробовать xip.io, либо переключиться на staging ClusterIssuer
+- Обратим внимание, как helm3 хранит информацию о release: kubectl get secrets -n harbor -l owner=helm
+
+Проверяем: <https://harbor.35.189.202.237.nip.io/>
+
+### Используем helmfile | Задание со ⭐
+
+Опишем установку **nginx-ingress**, **cert-manager** и **harbor** в helmfile
+
+- Установим helmfile
+
+```console
+brew install helmfile
+```
+
+> Для применения манифестов ClusterIssuers воспользуемся [incubator/raw](https://hub.helm.sh/charts/incubator/raw/0.2.3) - A place for all the Kubernetes resources which don't already have a home.
+
+Пилим helmfile.yaml
+
+```yml
+repositories:
+- name: stable
+  url: https://kubernetes-charts.storage.googleapis.com
+- name: jetstack
+  url: https://charts.jetstack.io
+- name: harbor
+  url: https://helm.goharbor.io
+- name: incubator
+  url: https://kubernetes-charts-incubator.storage.googleapis.com
+
+
+helmDefaults:
+  wait: true
+
+releases:
+- name: cert-manager
+  namespace: cert-manager
+  chart: jetstack/cert-manager
+  version: v0.15.1
+  set:
+  - name: installCRDs
+    value: true
+
+- name: cert-manager-issuers
+  needs:
+    - cert-manager/cert-manager
+  namespace: cert-manager
+  chart: incubator/raw
+  version: 0.2.3
+  values:
+    - ./cert-manager/values.yaml
+
+- name: harbor
+  needs:
+    - cert-manager/cert-manager
+  namespace: harbor
+  chart: harbor/harbor
+  version: 1.3.2
+  values:
+    - ./harbor/values.yaml
+
+- name: chartmuseum
+  needs:
+    - cert-manager/cert-manager
+  namespace: chartmuseum
+  chart: stable/chartmuseum
+  version: 2.13.0
+  values:
+    - ./chartmuseum/values.yaml
+```
+
+- Проверим отсутствие ns наших сервисов
+
+```console
+kubectl get ns
+NAME              STATUS   AGE
+default           Active   2d21h
+kube-node-lease   Active   2d21h
+kube-public       Active   2d21h
+kube-system       Active   2d21h
+```
+
+- Линтим
+
+```console
+helmfile lint
+
+Fetching incubator/raw
+Fetching jetstack/cert-manager
+Fetching harbor/harbor
+Fetching stable/chartmuseum
+Adding repo stable https://kubernetes-charts.storage.googleapis.com
+"stable" has been added to your repositories
+
+Adding repo jetstack https://charts.jetstack.io
+"jetstack" has been added to your repositories
+
+Adding repo harbor https://helm.goharbor.io
+"harbor" has been added to your repositories
+
+Adding repo incubator https://kubernetes-charts-incubator.storage.googleapis.com
+"incubator" has been added to your repositories
+
+Updating repo
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "jetstack" chart repository
+...Successfully got an update from the "incubator" chart repository
+...Successfully got an update from the "harbor" chart repository
+...Successfully got an update from the "stable" chart repository
+Update Complete. ⎈ Happy Helming!⎈
+
+Building dependency release=cert-manager, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/cert-manager/v0.15.1/jetstack/cert-manager/cert-manager
+Building dependency release=cert-manager-issuers, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/cert-manager-issuers/0.2.3/incubator/raw/raw
+Building dependency release=harbor, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/harbor/1.3.2/harbor/harbor/harbor
+Building dependency release=chartmuseum, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/chartmuseum/2.13.0/stable/chartmuseum/chartmuseum
+Linting release=cert-manager, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/cert-manager/v0.15.1/jetstack/cert-manager/cert-manager
+==> Linting /var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/cert-manager/v0.15.1/jetstack/cert-manager/cert-manager
+
+1 chart(s) linted, 0 chart(s) failed
+
+Linting release=cert-manager-issuers, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/cert-manager-issuers/0.2.3/incubator/raw/raw
+==> Linting /var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/cert-manager-issuers/0.2.3/incubator/raw/raw
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+
+Linting release=harbor, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/harbor/1.3.2/harbor/harbor/harbor
+==> Linting /var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/harbor/1.3.2/harbor/harbor/harbor
+
+1 chart(s) linted, 0 chart(s) failed
+
+Linting release=chartmuseum, chart=/var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/chartmuseum/2.13.0/stable/chartmuseum/chartmuseum
+==> Linting /var/folders/kq/byg7brhj5g39gnj_66sp02z00000gn/T/077869428/chartmuseum/2.13.0/stable/chartmuseum/chartmuseum
+
+1 chart(s) linted, 0 chart(s) failed
+```
+
+- Устанавлием nginx-ingress, cert-manager и harbor
+
+```console
+helmfile sync
+Adding repo stable https://kubernetes-charts.storage.googleapis.com
+"stable" has been added to your repositories
+
+Adding repo jetstack https://charts.jetstack.io
+"jetstack" has been added to your repositories
+
+Adding repo harbor https://helm.goharbor.io
+"harbor" has been added to your repositories
+
+Adding repo incubator https://kubernetes-charts-incubator.storage.googleapis.com
+"incubator" has been added to your repositories
+
+Updating repo
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "jetstack" chart repository
+...Successfully got an update from the "incubator" chart repository
+...Successfully got an update from the "harbor" chart repository
+...Successfully got an update from the "stable" chart repository
+Update Complete. ⎈ Happy Helming!⎈
+
+Affected releases are:
+  cert-manager (jetstack/cert-manager) UPDATED
+  cert-manager-issuers (incubator/raw) UPDATED
+  chartmuseum (stable/chartmuseum) UPDATED
+  harbor (harbor/harbor) UPDATED
+
+Upgrading release=cert-manager, chart=jetstack/cert-manager
+Release "cert-manager" has been upgraded. Happy Helming!
+NAME: cert-manager
+LAST DEPLOYED: Sat May 30 20:11:38 2020
+NAMESPACE: cert-manager
+STATUS: deployed
+REVISION: 4
+TEST SUITE: None
+NOTES:
+cert-manager has been deployed successfully!
+
+In order to begin issuing certificates, you will need to set up a ClusterIssuer
+or Issuer resource (for example, by creating a 'letsencrypt-staging' issuer).
+
+More information on the different types of issuers and how to configure them
+can be found in our documentation:
+
+https://cert-manager.io/docs/configuration/
+
+For information on how to configure cert-manager to automatically provision
+Certificates for Ingress resources, take a look at the `ingress-shim`
+documentation:
+
+https://cert-manager.io/docs/usage/ingress/
+
+Listing releases matching ^cert-manager$
+cert-manager    cert-manager    4               2020-05-30 20:11:38.415808 +0300 MSK    deployed        cert-manager-v0.15.1    v0.15.1
+
+Upgrading release=cert-manager-issuers, chart=incubator/raw
+Upgrading release=chartmuseum, chart=stable/chartmuseum
+Upgrading release=harbor, chart=harbor/harbor
+Release "cert-manager-issuers" has been upgraded. Happy Helming!
+NAME: cert-manager-issuers
+LAST DEPLOYED: Sat May 30 20:11:53 2020
+NAMESPACE: cert-manager
+STATUS: deployed
+REVISION: 4
+TEST SUITE: None
+
+Listing releases matching ^cert-manager-issuers$
+cert-manager-issuers    cert-manager    4               2020-05-30 20:11:53.680654 +0300 MSK    deployed        raw-0.2.3       0.2.3
+
+Release "chartmuseum" does not exist. Installing it now.
+NAME: chartmuseum
+LAST DEPLOYED: Sat May 30 20:11:54 2020
+NAMESPACE: chartmuseum
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+** Please be patient while the chart is being deployed **
+
+Get the ChartMuseum URL by running:
+
+  export POD_NAME=$(kubectl get pods --namespace chartmuseum -l "app=chartmuseum" -l "release=chartmuseum" -o jsonpath="{.items[0].metadata.name}")
+  echo http://127.0.0.1:8080/
+  kubectl port-forward $POD_NAME 8080:8080 --namespace chartmuseum
+
+Listing releases matching ^chartmuseum$
+chartmuseum     chartmuseum     1               2020-05-30 20:11:54.450653 +0300 MSK    deployed        chartmuseum-2.13.0      0.12.0
+
+Release "harbor" does not exist. Installing it now.
+NAME: harbor
+LAST DEPLOYED: Sat May 30 20:11:53 2020
+NAMESPACE: harbor
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Please wait for several minutes for Harbor deployment to complete.
+Then you should be able to visit the Harbor portal at https://core.harbor.domain.
+For more details, please visit https://github.com/goharbor/harbor.
+
+Listing releases matching ^harbor$
+harbor  harbor          1               2020-05-30 20:11:53.628585 +0300 MSK    deployed        harbor-1.3.2    1.10.2
+
+
+UPDATED RELEASES:
+NAME                   CHART                   VERSION
+cert-manager           jetstack/cert-manager   v0.15.1
+cert-manager-issuers   incubator/raw             0.2.3
+chartmuseum            stable/chartmuseum       2.13.0
+harbor                 harbor/harbor             1.3.2
+```
+
+- Проверяем:
+
+```console
+kubectl get certificate --all-namespaces
+NAMESPACE     NAME                                READY   SECRET                              AGE
+chartmuseum   chartmuseum.35.189.202.237.nip.io   True    chartmuseum.35.189.202.237.nip.io   2m14s
+harbor        harbor.35.189.202.237.nip.io        True    harbor.35.189.202.237.nip.io        2m11s
+
+kubectl get deployments --all-namespaces
+NAMESPACE       NAME                                       READY   UP-TO-DATE   AVAILABLE   AGE
+cert-manager    cert-manager                               1/1     1            1           3m14s
+cert-manager    cert-manager-cainjector                    1/1     1            1           3m14s
+cert-manager    cert-manager-webhook                       1/1     1            1           3m14s
+chartmuseum     chartmuseum-chartmuseum                    1/1     1            1           3m14s
+harbor          harbor-harbor-chartmuseum                  1/1     1            1           3m11s
+harbor          harbor-harbor-clair                        1/1     1            1           3m11s
+harbor          harbor-harbor-core                         1/1     1            1           3m11s
+harbor          harbor-harbor-jobservice                   1/1     1            1           3m11s
+harbor          harbor-harbor-notary-server                1/1     1            1           3m11s
+harbor          harbor-harbor-notary-signer                1/1     1            1           3m11s
+harbor          harbor-harbor-portal                       1/1     1            1           3m11s
+harbor          harbor-harbor-registry                     1/1     1            1           3m11s
+```
+
+### Создаем свой helm chart
+
+Типичная жизненная ситуация:
+
+- У вас есть приложение, которое готово к запуску в Kubernetes
+- У вас есть манифесты для этого приложения, но вам надо запускать его на разных окружениях с разными параметрами
+
+Возможные варианты решения:
+
+- Написать разные манифесты для разных окружений
+- Использовать "костыли" - sed, envsubst, etc...
+- Использовать полноценное решение для шаблонизации (helm, etc...)
+
+Мы рассмотрим третий вариант. Возьмем готовые манифесты и подготовим их к релизу на разные окружения.
+
+Использовать будем демо-приложение [hipster-shop](https://github.com/GoogleCloudPlatform/microservices-demo), представляющее собой типичный набор микросервисов.
+
+Стандартными средствами helm инициализируем структуру директории с содержимым будущего helm chart
+
+```console
+helm create kubernetes-templating/hipster-shop
+```
+
+Изучим созданный в качестве примера файл values.yaml и шаблоны в директории templates, примерно так выглядит стандартный helm chart.
+
+Мы будем создавать chart для приложения с нуля, поэтому удалим values.yaml и содержимое templates.
+
+После этого перенесем [файл](https://github.com/express42/otus-platform-snippets/blob/master/Module-04/05-Templating/manifests/all-hipster-shop.yaml) all-hipster-shop.yaml в директорию templates.
+
+В целом, helm chart уже готов, попробуем установить его:
+
+```console
+kubectl create ns hipster-shop
+namespace/hipster-shop created
+
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop
+Release "hipster-shop" does not exist. Installing it now.
+NAME: hipster-shop
+LAST DEPLOYED: Fri May 29 00:39:12 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+```
+
+После этого можно зайти в UI используя сервис типа NodePort (создается из манифестов) и проверить, что приложение заработало.
+
+```console
+kubectl get svc -n hipster-shop -l app=frontend
+NAME       TYPE       CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE
+frontend   NodePort   10.0.11.161   <none>        80:32500/TCP   12h
+```
+
+> Добавим правило FW разрешающее доступ по порту 32500 на все worker хосты GKE.
+
+Сейчас наш helm chart **hipster-shop** совсем не похож на настоящий. При этом, все микросервисы устанавливаются из одного файла all-hipster-shop.yaml
+
+Давайте исправим это и первым делом займемся микросервисом frontend. Скорее всего он разрабатывается отдельной командой, а исходный код хранится в отдельном репозитории.
+
+Поэтому, было бы логично вынести все что связано с frontend в отдельный helm chart.
+
+Создадим заготовку:
+
+```console
+helm create kubernetes-templating/frontend
+```
+
+Аналогично чарту **hipster-shop** удалим файл values.yaml и файлы в директории templates, создаваемые по умолчанию.
+
+Выделим из файла all-hipster-shop.yaml манифесты для установки микросервиса frontend.
+
+В директории templates чарта frontend создадим файлы:
+
+- deployment.yaml - должен содержать соответствующую часть из файла all-hipster-shop.yaml
+- service.yaml - должен содержать соответствующую часть из файла all-hipster-shop.yaml
+- ingress.yaml - должен разворачивать ingress с доменным именем shop.<IP-адрес>.nip.io
+
+После того, как вынесем описание deployment и service для **frontend** из файла all-hipster-shop.yaml переустановим chart hipster-shop и проверим, что доступ к UI пропал и таких ресурсов больше нет.
+
+```console
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop
+Release "hipster-shop" has been upgraded. Happy Helming!
+NAME: hipster-shop
+LAST DEPLOYED: Fri May 29 13:33:57 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 2
+TEST
+SUITE: None
+```console
+
+Установим chart **frontend** в namespace **hipster-shop** и проверим, что доступ к UI вновь появился:
+
+```console
+helm upgrade --install frontend kubernetes-templating/frontend --namespace hipster-shop
+Release "frontend" does not exist. Installing it now.
+NAME: frontend
+LAST DEPLOYED: Fri May 29 13:36:06 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+```
+
+Пришло время минимально шаблонизировать наш chart **frontend**
+
+Для начала продумаем структуру файла values.yaml
+
+- Docker образ из которого выкатывается frontend может пересобираться, поэтому логично вынести его тег в переменную **frontend.image.tag**
+
+В values.yaml это будет выглядеть следующим образом:
+
+```yml
+image:
+  tag: v0.1.3
+```
+
+> ❗Это значение по умолчанию и может (и должно быть) быть переопределено в CI/CD pipeline
+
+Теперь в манифесте deployment.yaml надо указать, что мы хотим использовать это переменную.
+
+Было:
+
+```yml
+image: gcr.io/google-samples/microservices-demo/frontend:v0.1.3
+```
+
+Стало:
+
+```yml
+image: gcr.io/google-samples/microservices-demo/frontend:{{ .Values.image.tag }}
+```
+
+Аналогичным образом шаблонизируем следующие параметры **frontend** chart
+
+- Количество реплик в deployment
+- **Port**, **targetPort** и **NodePort** в service
+- Опционально - тип сервиса. Ключ **NodePort** должен появиться в манифесте только если тип сервиса - **NodePort**
+- Другие параметры, которые на наш взгляд стоит шаблонизировать
+
+> ❗Не забываем указывать в файле values.yaml значения по умолчанию
+
+Как должен выглядеть минимальный итоговый файл values.yaml:
+
+```yml
+image:
+  tag: v0.1.3
+
+replicas: 1
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 8080
+  NodePort: 32500
+```
+
+service.yaml:
+
+```yml
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: frontend
+  ports:
+  - name: http
+    port: {{ .Values.service.port }}
+    targetPort: {{ .Values.service.targetPort }}
+    nodePort: {{ .Values.service.NodePort }}
+```
+
+Теперь наш **frontend** стал немного похож на настоящий helm chart. Не стоит забывать, что он все еще является частью одного
+большого микросервисного приложения **hipster-shop**.
+
+Поэтому было бы неплохо включить его в зависимости этого приложения.
+
+Для начала, удалим release frontend из кластера:
+
+```console
+helm delete frontend -n hipster-shop
+release "frontend" uninstalled
+```
+
+В Helm 2 файл requirements.yaml содержал список зависимостей helm chart (другие chart).  
+В Helm 3 список зависимостей рекомендуют объявлять в файле Chart.yaml.
+
+> При указании зависимостей в старом формате, все будет работать, единственное выдаст предупреждение. [Подробнее](https://helm.sh/docs/faq/#consolidation-of-requirements-yaml-into-chart-yaml)
+
+Добавим chart **frontend** как зависимость
+
+```yml
+dependencies:
+  - name: frontend
+    version: 0.1.0
+    repository: "file://../frontend"
+```
+
+Обновим зависимости:
+
+```console
+helm dep update kubernetes-templating/hipster-shop
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "harbor" chart repository
+...Successfully got an update from the "jetstack" chart repository
+...Successfully got an update from the "stable" chart repository
+Update Complete. ⎈Happy Helming!⎈
+Saving 1 charts
+Deleting outdated charts
+```
+
+В директории kubernetes-templating/hipster-shop/charts появился архив **frontend-0.1.0.tgz** содержащий chart frontend определенной версии и добавленный в chart hipster-shop как зависимость.
+
+Обновим release **hipster-shop** и убедимся, что ресурсы frontend вновь созданы.
+
+```console
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop
+Release "hipster-shop" has been upgraded. Happy Helming!
+NAME: hipster-shop
+LAST DEPLOYED: Fri May 29 14:36:18 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 3
+TEST SUITE: None
+```
+
+Осталось понять, как из CI-системы мы можем менять параметры helm chart, описанные в values.yaml.
+
+Для этого существует специальный ключ **--set**
+
+Изменим NodePort для **frontend** в release, не меняя его в самом chart:
+
+```console
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop --set frontend.service.NodePort=31234
+```
+
+> Так как как мы меняем значение переменной для зависимости - перед названием переменной указываем имя (название chart) этой зависимости.  
+> Если бы мы устанавливали chart frontend напрямую, то команда выглядела бы как --set service.NodePort=31234
+
+```console
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop --set frontend.service.NodePort=31234
+Release "hipster-shop" has been upgraded. Happy Helming!
+NAME: hipster-shop
+LAST DEPLOYED: Fri May 29 15:39:44 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 4
+TEST SUITE: None
+```
+
+### Создаем свой helm chart | Задание со ⭐
+
+Выберем сервис, который можно установить как зависимость, используя community chart's. Например, это может быть **Redis**.
+
+- Удалим из all-hipster-shop.yaml часть манифеста касательно redis
+- Добавим repo с redis
+
+```console
+helm repo add bitnami https://charts.bitnami.com/bitnami
+"bitnami" has been added to your repositories
+```
+
+- дополняем наш Charts.yaml
+
+```yml
+dependencies:
+  - name: redis
+    version: 10.6.17
+    repository: https://charts.bitnami.com/bitnami
+```
+
+- меняем значение переменной окружения **REDIS_ADDR** с redis-cart на redis-cart-master для cartservice Deployment
+- обновляем dep для hipster-shop: helm dep update kubernetes-templating/hipster-shop
+- выкатываем:
+
+```console
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop
+Release "hipster-shop" has been upgraded. Happy Helming!
+NAME: hipster-shop
+LAST DEPLOYED: Fri May 29 16:20:22 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 5
+TEST SUITE: None
+```
+
+- Проверяем создание pod
+
+```console
+kubectl get pods -n hipster-shop
+
+NAME                                     READY   STATUS    RESTARTS   AGE
+adservice-55f9757757-jnr72               1/1     Running   0          3h37m
+cartservice-78577c6fbf-ldm7k             1/1     Running   15         88m
+checkoutservice-6fcc84467f-27wrn         1/1     Running   0          3h37m
+currencyservice-8b7b8c647-mqsmj          1/1     Running   0          3h37m
+emailservice-6c46854ccc-bxxsv            1/1     Running   0          3h37m
+frontend-745f64f8b6-rfmvx                1/1     Running   0          3h18m
+paymentservice-76654769f7-xvlg8          1/1     Running   0          3h37m
+productcatalogservice-d564bdf4c-2cr74    1/1     Running   0          3h37m
+recommendationservice-76598d5889-jsq6m   1/1     Running   0          3h37m
+redis-cart-master-0                      1/1     Running   0          1m
+shippingservice-b6db65f7f-qshbv          1/1     Running   0          3h37m
+```
+
+- Проверяем что UI работает
+
+### Работа с helm-secrets | Необязательное задание
+
+Разберемся как работает плагин **helm-secrets**. Для этого добавим в Helm chart секрет и научимся хранить его в зашифрованном виде.
+
+Начнем с того, что установим плагин и необходимые для него зависимости (здесь и далее инструкции приведены для MacOS):
+
+```console
+brew install sops
+brew install gnupg2
+brew install gnu-getopt
+helm plugin install https://github.com/futuresimple/helm-secrets --version 2.0.2
+sops is already installed:
+sops 3.5.0 (latest)
+Installed plugin: secrets
+```
+
+> В домашней работы мы будем использовать PGP, но также можно воспользоваться KMS.
+
+Сгенерируем новый PGP ключ:
+
+```console
+gpg --full-generate-key
+```
+
+После этого командой gpg -k можно проверить, что ключ появился:
+
+```console
+gpg -k
+gpg: проверка таблицы доверия
+gpg: marginals needed: 3  completes needed: 1  trust model: pgp
+gpg: глубина: 0  достоверных:   1  подписанных:   0  доверие: 0-, 0q, 0n, 0m, 0f, 1u
+/Users/alexey/.gnupg/pubring.kbx
+--------------------------------
+pub   rsa2048 2020-05-29 [SC]
+      1EFA58CC515C2A87D5834A86C12D0C3E96B08842
+uid         [  абсолютно ] alexey <kovtalex@hmail.com>
+sub   rsa2048 2020-05-29 [E]
+```
+
+Создадим новый файл secrets.yaml в директории kubernetestemplating/frontend со следующим содержимым:
+
+```yml
+visibleKey: hiddenValue
+```
+
+И попробуем зашифровать его: sops -e -i --pgp <$ID> secrets.yaml
+
+> Примечание - вместо ID подставим длинный хеш, в выводе на предыдущей странице это 1EFA58CC515C2A87D5834A86C12D0C3E96B08842
+
+```console
+sops -e -i --pgp 1EFA58CC515C2A87D5834A86C12D0C3E96B08842 kubernetes-templating/frontend/secrets.yaml
+```
+
+Проверим, что файл secrets.yaml изменился. Сейчас его содержание должно выглядеть примерно так:
+
+```yml
+visibleKey: ENC[AES256_GCM,data:fOgyl1H2cmc5kYo=,iv:Cv54qLIkjV1/S3MEyyMPlBmBUp3sIER+Fw8duXgRpR8=,tag:A01Z0Vlrtncn3sTk4JyCtQ==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    lastmodified: '2020-05-29T15:44:09Z'
+    mac: ENC[AES256_GCM,data:rPXR9oZwlZ0eayWmXa47lBAnpsVjijkFikLX1xs42+sprwyu3Iq2UgP5rstYNNwE6J0ZzjRivQXRoCTM+Y2GI6JkZTO6B95E9xfBblFlqjb1L+63btovUnI6z+IyMCl+eAZO6dK7jYgGu21T6PfS3pk2RrdYSJ6tDIkZOqlZMIw=,iv:nnNKQ0cfGR+0FCsXv/CtFli628WZjNq8sn6Hv9uni/0=,tag:324Mv9MZxIMyLycZZsDALQ==,type:str]
+    pgp:
+    -   created_at: '2020-05-29T15:44:05Z'
+        enc: |
+            -----BEGIN PGP MESSAGE-----
+
+            hQEMA+tUwpJ4avm2AQf/fnDnm99OZrxgtmyeSE1KsHH4/ux0NLbmffT4yjKMg+yW
+            rwAhueBVt/utNCFyVSH6BAcMFP9Wy3EYvbKzZJx9/ypjXaJ+aZZ7MSzKRnNgauF3
+            pSB9noScMWquShGubvgsXr++Jc7aXd/qSCrIbrgkDfHTSYri4QO9CjkmZIXXFXdJ
+            ijx+BpgsJtWsCM/pzBMi31q0AU4G0SulH5CsVeg5TvrZMuUPzihVrqD4yOxZU3xx
+            w+QHtiDHzXxYowQTV9UVBiwaBEf1+pl2CYY3E5gizn7CuQuRc1bttvuGdht34YDH
+            TjRRmoFs0hPGEJFzbGfUMe8j8pb8ZApD2y5YZpzmSNJcAWumbdpN5agLapOCs0AJ
+            iZOW83tRSg4C6uc/eSZ9Z+IsoAq9fYDXrWVitXRuZ7AkTSB9J7Jm6YUrB8r39bx5
+            uux6k7/6QjN9OlZIbHIZHA7aPzmAZVPNDws2e9Q=
+            =742r
+            -----END PGP MESSAGE-----
+        fp: 1EFA58CC515C2A87D5834A86C12D0C3E96B08842
+    unencrypted_suffix: _unencrypted
+    version: 3.5.0
+```
+
+> Заметим, что структура файла осталась прежней. Мы видим ключ visibleKey, но его значение зашифровано
+
+В таком виде файл уже можно коммитить в Git, но для начала - научимся расшифровывать его.
+
+Можно использовать любой из инструментов:
+
+```console
+# helm secrets
+helm secrets view secrets.yaml
+
+# sops
+sops -d secrets.yaml
+```
+
+```console
+helm secrets view kubernetes-templating/frontend/secrets.yaml
+visibleKey: hiddenValue
+```
+
+```console
+sops -d kubernetes-templating/frontend/secrets.yaml
+visibleKey: hiddenValue
+```
+
+Теперь осталось понять, как добавить значение нашего секрета в настоящий секрет kubernetes и устанавливать его вместе с основным helm chart.
+
+Создадим в директории kubernetestemplating/frontend/templates еще один файл secret.yaml.  
+Несмотря на похожее название его предназначение будет отличаться.
+
+Поместим туда следующий шаблон:
+
+```yml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secret
+type: Opaque
+data:
+  visibleKey: {{ .Values.visibleKey | b64enc | quote }}
+```
+
+Теперь, если мы передадим в helm файл secrets.yaml как values файл - плагин **helm-secrets** поймет, что его надо расшифровать, а значение ключа visibleKey подставить в соответствующий шаблон секрета.
+
+Запустим установку:
+
+```console
+helm secrets upgrade --install frontend kubernetes-templating/frontend --namespace hipster-shop \
+-f kubernetes-templating/frontend/values.yaml \
+-f kubernetes-templating/frontend/secrets.yaml
+
+Release "frontend" does not exist. Installing it now.
+NAME: frontend
+LAST DEPLOYED: Fri May 29 18:50:00 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+kubernetes-templating/frontend/secrets.yaml.dec
+```
+
+> В процессе установки **helm-secrets** расшифрует наш секретный файл в другой временный файл secrets.yaml.dec, а после выполнения установки - удалит его
+
+- Проверим, что секрет создан и его содержимое соответсвуем нашим ожиданиям
+
+```console
+kubectl get secrets secret -n hipster-shop -o yaml
+apiVersion: v1
+data:
+  visibleKey: aGlkZGVuVmFsdWU=
+kind: Secret
+metadata:
+  annotations:
+    meta.helm.sh/release-name: frontend
+    meta.helm.sh/release-namespace: hipster-shop
+  creationTimestamp: "2020-05-29T15:50:00Z"
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  name: secret
+  namespace: hipster-shop
+  resourceVersion: "811436"
+  selfLink: /api/v1/namespaces/hipster-shop/secrets/secret
+  uid: b22f6a8d-6c8e-49a7-bcc2-3b86ce59a8ce
+type: Opaque
+```
+
+```console
+kubectl get secrets secret -n hipster-shop -o "jsonpath={.data.visibleKey}" | base64 -D
+hiddenValue%
+```
+
+- В CI/CD плагин helm-secrets можно использовать для подготовки авторизации на различных сервисах
+- Как обезопасить себя от коммита файлов с секретами - <https://github.com/zendesk/helm-secrets#important-tips>
+
+### Проверка
+
+Поместим все получившиеся helm chart's в наш установленный harbor в публичный проект.
+
+Установим helm-push
+
+```console
+helm plugin install https://github.com/chartmuseum/helm-push.git
+```
+
+Создадим файл kubernetes-templating/repo.sh со следующим содержанием:
+
+```bash
+#!/bin/bash
+helm repo add templating https://harbor.35.189.202.237.nip.io/chartrepo/library
+
+helm push --username admin --password Harbor12345  frontend/ templating
+helm push --username admin --password Harbor12345  hipster-shop/ templating
+```
+
+```console
+./repo.sh
+"templating" has been added to your repositories
+Pushing frontend-0.1.0.tgz to templating...
+Done.
+Pushing hipster-shop-0.1.0.tgz to templating...
+Done.
+```
+
+Проверим:
+
+Представим, что одна из команд разрабатывающих сразу несколько микросервисов нашего продукта решила, что helm не подходит для ее нужд и попробовала использовать решение на основе **jsonnet - kubecfg**.
+
+Посмотрим на возможности этой утилиты. Работать будем с сервисами paymentservice и shippingservice. Для начала - вынесем манифесты описывающие **service** и **deployment** для этих микросервисов из файла all-hipstershop.yaml в директорию kubernetes-templating/kubecfg
+
+Проверим:
+
+```console
+helm search repo -l templating
+NAME                    CHART VERSION   APP VERSION     DESCRIPTION
+templating/frontend     0.1.0           1.16.0          A Helm chart for Kubernetes
+templating/hipster-shop 0.1.0           1.16.0          A Helm chart for Kubernetes
+```
+
+И развернем:
+
+```console
+helm upgrade --install hipster-shop templating/hipster-shop --namespace hipster-shop
+helm upgrade --install frontend templating/frontend --namespace hipster-shop
+```
+
+### Kubecfg
+
+Представим, что одна из команд разрабатывающих сразу несколько микросервисов нашего продукта решила, что helm не подходит для ее нужд и попробовала использовать решение на основе **jsonnet - kubecfg**.
+
+Посмотрим на возможности этой утилиты. Работать будем с сервисами paymentservice и shippingservice.
+
+Для начала - вынесем манифесты описывающие **service** и **deployment** для этих микросервисов из файла all-hipstershop.yaml в директорию kubernetes-templating/kubecfg
+
+В итоге должно получиться четыре файла:
+
+```console
+tree -L 1 kubecfg
+kubecfg
+├── paymentservice-deployment.yaml
+├── paymentservice-service.yaml
+├── shippingservice-deployment.yaml
+└── shippingservice-service.yaml
+```
+
+Можно заметить, что манифесты двух микросервисов очень похожи друг на друга и может иметь смысл генерировать их из какого-то шаблона.  
+Попробуем сделать это.
+
+Обновим release hipster-shop, проверим, что микросервисы paymentservice и shippingservice исчезли из установки и магазин стал работать некорректно (при нажатии на кнопку Add to Cart).
+
+```console
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shopRelease "hipster-shop" has been upgraded. Happy Helming!
+NAME: hipster-shop
+LAST DEPLOYED: Fri May 29 23:26:43 2020
+NAMESPACE: hipster-shop
+STATUS: deployed
+REVISION: 2
+TEST SUITE: None
+```
+
+Установим [kubecfg](https://github.com/bitnami/kubecfg) (доступна в виде сборок по MacOS и Linux и в Homebrew)
+
+```console
+brew install kubecfg
+
+kubecfg version
+kubecfg version: v0.16.0
+jsonnet version: v0.15.0
+client-go version: v0.0.0-master+604c38a2
+```
+
+Kubecfg предполагает хранение манифестов в файлах формата .jsonnet и их генерацию перед установкой. Пример такого файла
+можно найти в [официальном репозитории](https://github.com/bitnami/kubecfg/blob/master/examples/guestbook.jsonnet)
+
+Напишем по аналогии свой .jsonnet файл - services.jsonnet.
+
+Для начала в файле мы должны указать libsonnet библиотеку, которую будем использовать для генерации манифестов. В домашней работе воспользуемся [готовой от bitnami](https://github.com/bitnami-labs/kube-libsonnet/)
+
+```console
+wget https://github.com/bitnami-labs/kube-libsonnet/raw/52ba963ca44f7a4960aeae9ee0fbee44726e481f/kube.libsonnet
+```
+
+> ❗ В kube.libsonnet исправим версию api для Deploymens и Service на apps/v1
+
+Импортируем ее:
+
+```json
+local kube = import "kube.libsonnet";
+```
+
+Перейдем к основной части
+
+Общая логика происходящего следующая:
+
+1. Пишем общий для сервисов [шаблон](https://raw.githubusercontent.com/express42/otus-platform-snippets/master/Module-04/05-Templating/hipster-shop-jsonnet/common.jsonnet), включающий описание service и deployment
+2. [Наследуемся](https://raw.githubusercontent.com/express42/otus-platform-snippets/master/Module-04/05-Templating/hipster-shop-jsonnet/payment-shipping.jsonnet) от него, указывая параметры для конкретных
+
+services.jsonnet:
+
+```json
+local kube = import "kube.libsonnet";
+
+local common(name) = {
+
+  service: kube.Service(name) {
+    target_pod:: $.deployment.spec.template,
+  },
+
+  deployment: kube.Deployment(name) {
+    spec+: {
+      template+: {
+        spec+: {
+          containers_: {
+            common: kube.Container("common") {
+              env: [{name: "PORT", value: "50051"}],
+              ports: [{containerPort: 50051}],
+              securityContext: {
+                readOnlyRootFilesystem: true,
+                runAsNonRoot: true,
+                runAsUser: 10001,
+              },
+              readinessProbe: {
+                  initialDelaySeconds: 20,
+                  periodSeconds: 15,
+                  exec: {
+                      command: [
+                          "/bin/grpc_health_probe",
+                          "-addr=:50051",
+                      ],
+                  },
+              },
+              livenessProbe: {
+                  initialDelaySeconds: 20,
+                  periodSeconds: 15,
+                  exec: {
+                      command: [
+                          "/bin/grpc_health_probe",
+                          "-addr=:50051",
+                      ],
+                  },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+
+{
+  catalogue: common("paymentservice") {
+    deployment+: {
+      spec+: {
+        template+: {
+          spec+: {
+            containers_+: {
+              common+: {
+                name: "server",
+                image: "gcr.io/google-samples/microservices-demo/paymentservice:v0.1.3",
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+
+  payment: common("shippingservice") {
+    deployment+: {
+      spec+: {
+        template+: {
+          spec+: {
+            containers_+: {
+              common+: {
+                name: "server",
+                image: "gcr.io/google-samples/microservices-demo/shippingservice:v0.1.3",
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Проверим, что манифесты генерируются корректно:
+
+```console
+kubecfg show services.jsonnet
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations: {}
+  labels:
+    name: paymentservice
+  name: paymentservice
+spec:
+  minReadySeconds: 30
+  replicas: 1
+  selector:
+    matchLabels:
+      name: paymentservice
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations: {}
+      labels:
+        name: paymentservice
+    spec:
+      containers:
+      - args: []
+        env:
+        - name: PORT
+          value: "50051"
+        image: gcr.io/google-samples/microservices-demo/paymentservice:v0.1.3
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:50051
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        name: server
+        ports:
+        - containerPort: 50051
+        readinessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:50051
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+        stdin: false
+        tty: false
+        volumeMounts: []
+      imagePullSecrets: []
+      initContainers: []
+      terminationGracePeriodSeconds: 30
+      volumes: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations: {}
+  labels:
+    name: paymentservice
+  name: paymentservice
+spec:
+  ports:
+  - port: 50051
+    targetPort: 50051
+  selector:
+    name: paymentservice
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations: {}
+  labels:
+    name: shippingservice
+  name: shippingservice
+spec:
+  minReadySeconds: 30
+  replicas: 1
+  selector:
+    matchLabels:
+      name: shippingservice
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations: {}
+      labels:
+        name: shippingservice
+    spec:
+      containers:
+      - args: []
+        env:
+        - name: PORT
+          value: "50051"
+        image: gcr.io/google-samples/microservices-demo/shippingservice:v0.1.3
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:50051
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        name: server
+        ports:
+        - containerPort: 50051
+        readinessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:50051
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+        stdin: false
+        tty: false
+        volumeMounts: []
+      imagePullSecrets: []
+      initContainers: []
+      terminationGracePeriodSeconds: 30
+      volumes: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations: {}
+  labels:
+    name: shippingservice
+  name: shippingservice
+spec:
+  ports:
+  - port: 50051
+    targetPort: 50051
+  selector:
+    name: shippingservice
+  type: ClusterIP
+```
+
+И установим их:
+
+```console
+kubecfg update services.jsonnet --namespace hipster-shop
+INFO  Validating deployments paymentservice
+INFO  validate object "apps/v1, Kind=Deployment"
+INFO  Validating services paymentservice
+INFO  validate object "/v1, Kind=Service"
+INFO  Validating services shippingservice
+INFO  validate object "/v1, Kind=Service"
+INFO  Validating deployments shippingservice
+INFO  validate object "apps/v1, Kind=Deployment"
+INFO  Fetching schemas for 4 resources
+INFO  Creating services paymentservice
+INFO  Creating services shippingservice
+INFO  Creating deployments paymentservice
+INFO  Creating deployments shippingservice
+```
+
+Через какое-то время магазин снова должен заработать и товары можно добавить в корзину
+
+### Задание со ⭐ | qbec
+
+Выберем еще один микросервис (recommendationservice)из состава hipster-shop и попробуем использовать другое решение на основе jsonnet,
+например [qbec](https://github.com/splunk/qbec)
+
+Также можно использовать [Kapitan](https://github.com/deepmind/kapitan)
+
+Приложим артефакты их использования в директорию kubernetes-templating/jsonnet и опишем проделанную работу и порядок установки.
+
+- Установим qbec
+
+```console
+brew tap splunk/tap
+brew install qbec
+```
+
+- Подготовим новую структуру для приложения
+
+```console
+qbec init recommendationservice
+using server URL "https://34.78.75.22" and default namespace "default" for the default environment
+wrote recommendationservice/params.libsonnet
+wrote recommendationservice/environments/base.libsonnet
+wrote recommendationservice/environments/default.libsonnet
+wrote recommendationservice/qbec.yaml
+```
+
+- Конвертируем манифест Deployment и Service (recommendationservice) из yaml в json и поместим результат в компонент components/recommendationservice.jsonnet
+- Также добавим в components/recommendationservice.jsonnet блок:
+
+```json
+local env = {
+  name: std.extVar('qbec.io/env'),
+  namespace: std.extVar('qbec.io/defaultNs'),
+};
+local p = import '../params.libsonnet';
+local params = p.components.recommendationservice;
+```
+
+- Шаблонизируем необходимые нам параметры в components/recommendationservice.jsonnet:
+
+```json
+            "resources": {
+              "requests": {
+                "cpu": params.cpu_requests,
+                "memory": params.memory_requests
+              },
+              "limits": {
+                "cpu": params.cpu_limits,
+                "memory": params.memory_limits
+              }
+            }
+```
+
+- Определим их значения по умолчанию для всех окружений в environments/base.libsonnet:
+
+```json
+{
+  components: {
+    recommendationservice: {
+      name: "recommendationservice",
+      image: "gcr.io/google-samples/microservices-demo/recommendationservice:v0.1.3",
+      replicas: 1,
+
+      cpu_requests: "100m",
+      memory_requests: "220Mi",
+      cpu_limits: "200m",
+      memory_limits: "450Mi",
+
+      containterPort: 8080,
+      servicePort: 8080,
+    },
+  },
+}
+```
+
+- Создадим environments/dev.libsonnet содержаший значения переменных для окружение dev:
+
+```json
+local base = import './base.libsonnet';
+
+base {
+  components +: {
+      recommendationservice +: {
+          name: "dev-recommendationservice",
+          replicas: 3,
+      },
+  },
+}
+```
+
+- Добавим наше новое окружение dev в params.libsonnet:
+
+```json
+  dev: import './environments/dev.libsonnet',
+```
+
+- И в qbec.yaml:
+
+```json
+    dev:
+      defaultNamespace: hipster-shop
+      server: https://34.78.75.22
+  namespaceTagSuffix: true
+```
+
+> namespaceTagSuffix: true - позволит добавлять суффикс к namespace, указывая в командной строке: --app-tag=\<suffix\>
+
+- Провалидируем окружение по умолчанию
+
+```console
+qbec validate default
+setting cluster to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+setting context to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+cluster metadata load took 334ms
+1 components evaluated in 4ms
+✔ deployments recommendationservice -n hipster-shop (source recommendationservice) is valid
+✔ services recommendationservice -n hipster-shop (source recommendationservice) is valid
+---
+stats:
+  valid: 2
+
+command took 540ms
+```
+
+- Просмотрим:
+
+```yml
+qbec show default
+1 components evaluated in 5ms
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    qbec.io/component: recommendationservice
+  labels:
+    qbec.io/application: recommendationservice
+    qbec.io/environment: default
+  name: recommendationservice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recommendationservice
+  template:
+    metadata:
+      labels:
+        app: recommendationservice
+    spec:
+      containers:
+      - env:
+        - name: PORT
+          value: "8080"
+        - name: PRODUCT_CATALOG_SERVICE_ADDR
+          value: productcatalogservice:3550
+        - name: ENABLE_PROFILER
+          value: "0"
+        image: gcr.io/google-samples/microservices-demo/recommendationservice:v0.1.3
+        livenessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:8080
+          periodSeconds: 5
+        name: server
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:8080
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 200m
+            memory: 450Mi
+          requests:
+            cpu: 100m
+            memory: 220Mi
+      terminationGracePeriodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    qbec.io/component: recommendationservice
+  labels:
+    qbec.io/application: recommendationservice
+    qbec.io/environment: default
+  name: recommendationservice
+spec:
+  ports:
+  - name: grpc
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: recommendationservice
+  type: ClusterIP
+```
+
+- И выкатим:
+
+```console
+qbec apply default
+setting cluster to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+setting context to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+cluster metadata load took 279ms
+1 components evaluated in 2ms
+
+will synchronize 2 object(s)
+
+Do you want to continue [y/n]: y
+1 components evaluated in 1ms
+create deployments recommendationservice -n hipster-shop (source recommendationservice)
+create services recommendationservice -n hipster-shop (source recommendationservice)
+waiting for deletion list to be returned
+server objects load took 669ms
+---
+stats:
+  created:
+  - deployments recommendationservice -n hipster-shop (source recommendationservice)
+  - services recommendationservice -n hipster-shop (source recommendationservice)
+
+command took 9.51s
+```
+
+- Проверяем
+
+```console
+kubectl get deployments -n hipster-shop
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+adservice               1/1     1            1           83m
+cartservice             1/1     1            1           57m
+checkoutservice         1/1     1            1           83m
+currencyservice         1/1     1            1           83m
+emailservice            1/1     1            1           83m
+frontend                1/1     1            1           83m
+paymentservice          1/1     1            1           82m
+productcatalogservice   1/1     1            1           83m
+recommendationservice   1/1     1            1           2m30s
+shippingservice         1/1     1            1           82m
+```
+
+- Валидания для dev окружения
+
+```console
+qbec validate dev
+setting cluster to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+setting context to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+cluster metadata load took 263ms
+1 components evaluated in 5ms
+✔ deployments dev-recommendationservice -n hipster-shop (source recommendationservice) is valid
+✔ services dev-recommendationservice -n hipster-shop (source recommendationservice) is valid
+---
+stats:
+  valid: 2
+
+command took 500ms
+```
+
+- Просмотрим:
+
+```yml
+qbec show dev --app-tag dev
+1 components evaluated in 3ms
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    qbec.io/component: recommendationservice
+  labels:
+    qbec.io/application: recommendationservice
+    qbec.io/environment: dev
+    qbec.io/tag: dev
+  name: dev-recommendationservice
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dev-recommendationservice
+  template:
+    metadata:
+      labels:
+        app: dev-recommendationservice
+    spec:
+      containers:
+      - env:
+        - name: PORT
+          value: "8080"
+        - name: PRODUCT_CATALOG_SERVICE_ADDR
+          value: productcatalogservice:3550
+        - name: ENABLE_PROFILER
+          value: "0"
+        image: gcr.io/google-samples/microservices-demo/recommendationservice:v0.1.3
+        livenessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:8080
+          periodSeconds: 5
+        name: server
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:8080
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 200m
+            memory: 450Mi
+          requests:
+            cpu: 100m
+            memory: 220Mi
+      terminationGracePeriodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    qbec.io/component: recommendationservice
+  labels:
+    qbec.io/application: recommendationservice
+    qbec.io/environment: dev
+    qbec.io/tag: dev
+  name: dev-recommendationservice
+spec:
+  ports:
+  - name: grpc
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: dev-recommendationservice
+  type: ClusterIP
+```
+
+> Увеличилость количество реплик и изменились значения для name
+
+- Выкатим с dry-run
+
+```console
+qbec apply dev --app-tag dev --dry-run
+
+---
+stats:
+  created:
+  - deployments dev-recommendationservice -n hipster-shop-dev (source recommendationservice)
+  - services dev-recommendationservice -n hipster-shop-dev (source recommendationservice)
+```
+
+- И наконец выкатим dev в namespace hipster-shop-dev
+
+```console
+qbec apply dev --app-tag dev
+
+setting cluster to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+setting context to gke_angular-pursuit-275120_europe-west1-b_cluster-1
+cluster metadata load took 264ms
+1 components evaluated in 4ms
+
+will synchronize 2 object(s)
+
+Do you want to continue [y/n]: y
+1 components evaluated in 2ms
+create deployments dev-recommendationservice -n hipster-shop-dev (source recommendationservice)
+create services dev-recommendationservice -n hipster-shop-dev (source recommendationservice)
+waiting for deletion list to be returned
+server objects load took 856ms
+---
+stats:
+  created:
+  - deployments dev-recommendationservice -n hipster-shop-dev (source recommendationservice)
+  - services dev-recommendationservice -n hipster-shop-dev (source recommendationservice)
+
+command took 3.07s
+```
+
+Проверяем:
+
+```console
+kubectl describe deployments -n hipster-shop-dev | grep replicas
+
+NewReplicaSet:   dev-recommendationservice-6b6bd45b99 (3/3 replicas created)
+```
+
+### Kustomize
+
+Отпилим еще один (cartservice) микросервис из all-hipstershop.yaml.yaml и займемся его kustomизацией.
+
+В минимальном варианте реализуем установку на три окружения - hipster-shop (namespace hipster-shop), hipster-shop-prod (namespace hipster-shop-prod) и hipster-shop-dev (namespace hipster-shop-dev) из одних манифестов deployment и service.
+
+Окружения должны отличаться:
+
+- Набором labels во всех манифестах
+- Префиксом названий ресурсов
+- Для dev окружения значением переменной окружения REDIS_ADDR
+
+Установим kustomize:
+
+```console
+brew install kustomize
+```
+
+Для namespace hipster-shop:
+
+```yml
+kustomize build .
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: cartservice
+  namespace: hipster-shop
+spec:
+  ports:
+  - name: grpc
+    port: 7070
+    targetPort: 7070
+  selector:
+    app: cartservice
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cartservice
+  namespace: hipster-shop
+spec:
+  selector:
+    matchLabels:
+      app: cartservice
+  template:
+    metadata:
+      labels:
+        app: cartservice
+    spec:
+      containers:
+      - env:
+        - name: REDIS_ADDR
+          value: redis-cart-master:6379
+        - name: PORT
+          value: "7070"
+        - name: LISTEN_ADDR
+          value: 0.0.0.0
+        image: gcr.io/google-samples/microservices-demo/cartservice:v0.1.3
+        livenessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:7070
+            - -rpc-timeout=5s
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        name: server
+        ports:
+        - containerPort: 7070
+        readinessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:7070
+            - -rpc-timeout=5s
+          initialDelaySeconds: 15
+        resources:
+          limits:
+            cpu: 300m
+            memory: 128Mi
+          requests:
+            cpu: 200m
+            memory: 64Mi
+```
+
+Для namespace hipster-shop-dev:
+
+```yml
+kustomize build .
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    environment: dev
+  name: dev-cartservice
+  namespace: hipster-shop-dev
+spec:
+  ports:
+  - name: grpc
+    port: 7070
+    targetPort: 7070
+  selector:
+    app: cartservice
+    environment: dev
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    environment: dev
+  name: dev-cartservice
+  namespace: hipster-shop-dev
+spec:
+  selector:
+    matchLabels:
+      app: cartservice
+      environment: dev
+  template:
+    metadata:
+      labels:
+        app: cartservice
+        environment: dev
+    spec:
+      containers:
+      - env:
+        - name: REDIS_ADDR
+          value: redis-cart:6379
+        - name: PORT
+          value: "7070"
+        - name: LISTEN_ADDR
+          value: 0.0.0.0
+        image: gcr.io/google-samples/microservices-demo/cartservice:v0.1.3
+        livenessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:7070
+            - -rpc-timeout=5s
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        name: server
+        ports:
+        - containerPort: 7070
+        readinessProbe:
+          exec:
+            command:
+            - /bin/grpc_health_probe
+            - -addr=:7070
+            - -rpc-timeout=5s
+          initialDelaySeconds: 15
+        resources:
+          limits:
+            cpu: 300m
+            memory: 128Mi
+          requests:
+            cpu: 200m
+            memory: 64Mi
+```
+
+Задеплоим и проверим работу UI:
+
+```console
+kustomize build . | kubectl apply -f -
+
+Warning: kubectl apply should be used on resource created by either kubectl create --save-config or kubectl apply
+service/cartservice created
+deployment.apps/cartservice created
+```
+
 ## Volumes, Storages, StatefulSet
 
 ### Установка и запуск kind
@@ -43,7 +2394,7 @@ spec:
         image: minio/minio:RELEASE.2019-07-10T00-34-56Z
         args:
         - server
-        - /data 
+        - /data
         ports:
         - containerPort: 9000
         # These volume mounts are persistent. Each pod in the PetSet
@@ -61,7 +2412,7 @@ spec:
           initialDelaySeconds: 120
           periodSeconds: 20
   # These are converted to volume claims by the controller
-  # and mounted at the paths mentioned above. 
+  # and mounted at the paths mentioned above.
   volumeClaimTemplates:
   - metadata:
       name: data
