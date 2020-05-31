@@ -1191,7 +1191,7 @@ dependencies:
 - выкатываем:
 
 ```console
-helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop --set frontend.service.NodePort=31234
+helm upgrade --install hipster-shop kubernetes-templating/hipster-shop --namespace hipster-shop
 Release "hipster-shop" has been upgraded. Happy Helming!
 NAME: hipster-shop
 LAST DEPLOYED: Fri May 29 16:20:22 2020
