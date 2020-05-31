@@ -12,4 +12,3 @@ securityContext: {}
 env:
   open:
     DISABLE_API: false
-    

@@ -6,5 +6,5 @@ base {
           name: "dev-recommendationservice",
           replicas: 3,
       },
-  }
+  },
 }
