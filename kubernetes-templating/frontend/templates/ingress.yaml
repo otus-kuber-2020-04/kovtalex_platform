@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: frontend
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+spec:
+  tls:
+  - hosts:
+    - shop.35.189.202.237.nip.io
+    secretName: shop.35.189.202.237.nip.io
+  rules:
+  - host: shop.35.189.202.237.nip.io
+    http:
+      paths:
+      - backend:
+          serviceName: frontend
+          servicePort: 8080

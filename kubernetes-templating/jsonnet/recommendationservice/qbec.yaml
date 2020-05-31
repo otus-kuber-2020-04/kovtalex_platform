@@ -1,0 +1,14 @@
+apiVersion: qbec.io/v1alpha1
+kind: App
+metadata:
+  name: recommendationservice
+spec:
+  namespaceTagSuffix: true
+  environments:
+    default:
+      defaultNamespace: hipster-shop
+      server: https://34.78.75.22
+    dev:
+      defaultNamespace: hipster-shop    
+      server: https://34.78.75.22
+  vars: {}

@@ -1,0 +1,8 @@
+redis:
+  cluster:
+    enabled: false
+  usePassword: false
+  nameOverride: redis-cart
+  fullnameOverride: redis-cart
+  securityContext.enabled: false
+  metrics.enabled: false
