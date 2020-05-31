@@ -427,7 +427,7 @@ Events:                    <none>
 
 Кастомизируем установку chartmuseum
 
-- Создадим директорию kubernetes-templating/chartmuseum/ и поместите туда файл values.yaml
+- Создадим директорию kubernetes-templating/chartmuseum/ и поместим туда файл values.yaml
 - Изучим [содержимое](https://github.com/helm/charts/blob/master/stable/chartmuseum/values.yaml) оригинальный файла values.yaml
 - Включим:
   - Создание ingress ресурса с корректным hosts.name (должен использоваться nginx-ingress)
@@ -1049,14 +1049,14 @@ image: gcr.io/google-samples/microservices-demo/frontend:v0.1.3
 image: gcr.io/google-samples/microservices-demo/frontend:{{ .Values.image.tag }}
 ```
 
-Аналогичным образом шаблонизируйте следующие параметры **frontend** chart
+Аналогичным образом шаблонизируем следующие параметры **frontend** chart
 
 - Количество реплик в deployment
 - **Port**, **targetPort** и **NodePort** в service
 - Опционально - тип сервиса. Ключ **NodePort** должен появиться в манифесте только если тип сервиса - **NodePort**
 - Другие параметры, которые на наш взгляд стоит шаблонизировать
 
-> ❗Не забывайте указывать в файле values.yaml значения по умолчанию
+> ❗Не забываем указывать в файле values.yaml значения по умолчанию
 
 Как должен выглядеть минимальный итоговый файл values.yaml:
 
@@ -1092,7 +1092,7 @@ spec:
 
 Поэтому было бы неплохо включить его в зависимости этого приложения.
 
-Для начала, удалите release frontend из кластера:
+Для начала, удалим release frontend из кластера:
 
 ```console
 helm delete frontend -n hipster-shop
@@ -1269,7 +1269,7 @@ visibleKey: hiddenValue
 
 И попробуем зашифровать его: sops -e -i --pgp <$ID> secrets.yaml
 
-> Примечание - вместо ID подставьте длинный хеш, в выводе на предыдущей странице это 1EFA58CC515C2A87D5834A86C12D0C3E96B08842
+> Примечание - вместо ID подставим длинный хеш, в выводе на предыдущей странице это 1EFA58CC515C2A87D5834A86C12D0C3E96B08842
 
 ```console
 sops -e -i --pgp 1EFA58CC515C2A87D5834A86C12D0C3E96B08842 kubernetes-templating/frontend/secrets.yaml
@@ -1334,7 +1334,7 @@ visibleKey: hiddenValue
 Создадим в директории kubernetestemplating/frontend/templates еще один файл secret.yaml.  
 Несмотря на похожее название его предназначение будет отличаться.
 
-Поместите туда следующий шаблон:
+Поместим туда следующий шаблон:
 
 ```yml
 apiVersion: v1
@@ -1431,7 +1431,7 @@ Done.
 
 Представим, что одна из команд разрабатывающих сразу несколько микросервисов нашего продукта решила, что helm не подходит для ее нужд и попробовала использовать решение на основе **jsonnet - kubecfg**.
 
-Посмотрим на возможности этой утилиты. Работать будем с сервисами paymentservice и shippingservice. Для начала - вынесите манифесты описывающие **service** и **deployment** для этих микросервисов из файла all-hipstershop.yaml в директорию kubernetes-templating/kubecfg
+Посмотрим на возможности этой утилиты. Работать будем с сервисами paymentservice и shippingservice. Для начала - вынесем манифесты описывающие **service** и **deployment** для этих микросервисов из файла all-hipstershop.yaml в директорию kubernetes-templating/kubecfg
 
 Проверим:
 
@@ -1455,7 +1455,7 @@ helm upgrade --install frontend templating/frontend --namespace hipster-shop
 
 Посмотрим на возможности этой утилиты. Работать будем с сервисами paymentservice и shippingservice.
 
-Для начала - вынесите манифесты описывающие **service** и **deployment** для этих микросервисов из файла all-hipstershop.yaml в директорию kubernetes-templating/kubecfg
+Для начала - вынесем манифесты описывающие **service** и **deployment** для этих микросервисов из файла all-hipstershop.yaml в директорию kubernetes-templating/kubecfg
 
 В итоге должно получиться четыре файла:
 
@@ -1789,7 +1789,7 @@ INFO  Creating deployments shippingservice
 
 ### Задание со ⭐ | qbec
 
-Выберем еще один микросервис (recommendationservice)из состава hipster-shop и попробуйте использовать другое решение на основе jsonnet,
+Выберем еще один микросервис (recommendationservice)из состава hipster-shop и попробуем использовать другое решение на основе jsonnet,
 например [qbec](https://github.com/splunk/qbec)
 
 Также можно использовать [Kapitan](https://github.com/deepmind/kapitan)
@@ -1914,7 +1914,7 @@ command took 540ms
 
 - Просмотрим:
 
-```yaml
+```yml
 qbec show default
 1 components evaluated in 5ms
 ---
@@ -2268,7 +2268,7 @@ spec:
 
 Для namespace hipster-shop-dev:
 
-```yaml
+```yml
 kustomize build .
 apiVersion: v1
 kind: Service
