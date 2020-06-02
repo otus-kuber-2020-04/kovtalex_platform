@@ -1037,7 +1037,7 @@ kubernetes-operators
     └── service-account.yml
 ```
 
-Для PR:
+Результаты:
 
 ```console
 kubectl get jobs
