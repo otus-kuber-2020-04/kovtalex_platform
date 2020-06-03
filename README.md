@@ -1,5 +1,168 @@
 # kovtalex_platform
 
+## Мониторинг сервиса в кластере k8s
+
+### План
+
+Пойдем по пути установки всего руками и для выполнения домашнего задания напишем и применим манифесты для:
+
+- nginx с [nginx-exporter](https://github.com/nginxinc/nginx-prometheus-exporter)
+- kube-state-metrics
+- Prometheus
+- Grafana
+
+### nginx (kubernetes-monitoring/nginx)
+
+Начнем с nginx и подготовим манифесты для:
+
+- Deployment с nginx и sidecar [nginx-exporter](https://github.com/nginxinc/nginx-prometheus-exporter) контейнерами со следующими характеристиками
+  - nginx работающий на 80 порту с поддержкой [nginx-статуса](http://nginx.org/ru/docs/http/ngx_http_stub_status_module.html) доступного на порту 8080 по адресу <http://127.0.0.1:8080/basic_status>
+  - nginx-exporter отдающий метрики в формате prometheus на порту 9113
+  - три реплики
+- ConfigMap с конфигурацией nginx
+- Service для доступа к нашим pods по необходимым портам и анотациями для prometheus
+
+Развернем:
+
+```console
+kubectl apply -f nginx-configMap.yaml
+kubectl apply -f nginx-deployment.yaml
+kubectl apply -f nginx-nginx-service.yaml
+```
+
+И проверим работу nginx-exporter:
+
+```console
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-869f7cf565-hk2xd   2/2     Running   0          11h
+nginx-869f7cf565-kjdk8   2/2     Running   0          11h
+nginx-869f7cf565-qd7wx   2/2     Running   0          11h
+
+kubectl port-forward service/nginx 9113:9113
+
+curl http://127.0.0.1:9113/metrics
+# HELP nginx_connections_accepted Accepted client connections
+# TYPE nginx_connections_accepted counter
+nginx_connections_accepted 1024
+# HELP nginx_connections_active Active client connections
+# TYPE nginx_connections_active gauge
+nginx_connections_active 1
+# HELP nginx_connections_handled Handled client connections
+# TYPE nginx_connections_handled counter
+nginx_connections_handled 1024
+# HELP nginx_connections_reading Connections where NGINX is reading the request header
+# TYPE nginx_connections_reading gauge
+nginx_connections_reading 0
+# HELP nginx_connections_waiting Idle client connections
+# TYPE nginx_connections_waiting gauge
+nginx_connections_waiting 0
+# HELP nginx_connections_writing Connections where NGINX is writing the response back to the client
+# TYPE nginx_connections_writing gauge
+nginx_connections_writing 1
+# HELP nginx_http_requests_total Total http requests
+# TYPE nginx_http_requests_total counter
+nginx_http_requests_total 3355
+# HELP nginx_up Status of the last metric scrape
+# TYPE nginx_up gauge
+nginx_up 1
+# HELP nginxexporter_build_info Exporter build information
+# TYPE nginxexporter_build_info gauge
+nginxexporter_build_info{gitCommit="a2910f1",version="0.7.0"} 1
+```
+
+### kube-state-metrics (kubernetes-monitoring/kube-state-metrics)
+
+Подготовим манифесты kube-state-metrics:
+
+- cluster-role-binding.yaml
+- cluster-role.yaml
+- deployment.yaml
+- service-account.yaml
+- service.yaml
+
+Развернем в ns kube-system:
+
+```console
+kubectl apply -f service-account.yaml
+kubectl apply -f cluster-role.yaml
+kubectl apply -f cluster-role-binding.yaml
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+```
+
+И проверим:
+
+```console
+kubectl get pods -n kube-system -l app.kubernetes.io/name=kube-state-metrics
+NAME                                  READY   STATUS    RESTARTS   AGE
+kube-state-metrics-6dc5b5b496-78mds   1/1     Running   0          70m
+```
+
+### Prometheus (kubernetes-monitoring/prometheus)
+
+Подготовим манифесты Prometheus:
+
+- ns.yaml
+- clusterRole.yaml
+- clusterRoleBinding.yaml
+- configMap.yaml
+- deployment.yaml
+- service.yaml
+
+Развернем в ns monitoring:
+
+```console
+kubectl apply -f ns.yaml
+kubectl apply -f clusterRole.yaml
+kubectl apply -f clusterRoleBinding.yaml
+kubectl apply -f configMap.yaml
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+```
+
+И проверим:
+
+```console
+kubectl get pods -n monitoring
+NAME                                    READY   STATUS    RESTARTS   AGE
+prometheus-deployment-8dcdcf66b-t6lnd   1/1     Running   0          87m
+```
+
+### Grafana (kubernetes-monitoring/grafana)
+
+Подготовим манифесты Grafana:
+
+- configMap.yaml
+- deployment.yaml
+- service.yaml
+
+```console
+kubectl apply -f configMap.yaml
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+```
+
+И проверим:
+
+```console
+kubectl get pods -n monitoring
+NAME                                    READY   STATUS    RESTARTS   AGE
+grafana-9fc4bdfc5-xxt7l                 1/1     Running   0          87m
+prometheus-deployment-8dcdcf66b-t6lnd   1/1     Running   0          87m
+
+kubectl get svc -n monitoring
+NAME                 TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)          AGE
+grafana              NodePort   10.100.47.218   <none>        3000:32000/TCP   11h
+prometheus-service   NodePort   10.111.99.254   <none>        8080:30000/TCP   12h
+```
+
+Далее зайдем в Grafana по адресу нашей ноды и порту 32000 и импортируем [dashboard](https://github.com/nginxinc/nginx-prometheus-exporter/tree/master/grafana).
+
+Теперь мы можем наблюдать статусы наших nginx и необходимые нам метрики:
+
+![Grafana](kubernetes-monitoring/grafana.png)
+
 ## Операторы, CustomResourceDefinition
 
 ### Подготовка minikube
