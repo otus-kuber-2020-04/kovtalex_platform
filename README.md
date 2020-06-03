@@ -2,25 +2,190 @@
 
 ## Мониторинг сервиса в кластере k8s
 
-### План
+### Prometheus-operator
 
-Пойдем по пути установки всего руками и для выполнения домашнего задания напишем и применим манифесты для:
+Развертывать prometheus-operator будет через Helm3:
 
-- nginx с [nginx-exporter](https://github.com/nginxinc/nginx-prometheus-exporter)
-- kube-state-metrics
-- Prometheus
-- Grafana
+```console
+kubectl create ns monitoring
+helm upgrade --install  prometheus-operator stable/prometheus-operator -n monitoring
+```
+
+Проверяем:
+
+```console
+
+kubectl get pods -n monitoring
+NAME                                                     READY   STATUS    RESTARTS   AGE
+alertmanager-prometheus-operator-alertmanager-0          2/2     Running   0          82s
+prometheus-operator-grafana-64bcbf975f-7dx9k             2/2     Running   0          88s
+prometheus-operator-kube-state-metrics-5fdcd78bc-gnqv4   1/1     Running   0          88s
+prometheus-operator-operator-778d5d7b98-6c6pj            2/2     Running   0          88s
+prometheus-operator-prometheus-node-exporter-9grbk       1/1     Running   0          88s
+prometheus-prometheus-operator-prometheus-0              3/3     Running   1          72s
+```
 
 ### nginx (kubernetes-monitoring/nginx)
 
-Начнем с nginx и подготовим манифесты для:
+Подготовим манифесты для:
 
 - Deployment с nginx и sidecar [nginx-exporter](https://github.com/nginxinc/nginx-prometheus-exporter) контейнерами со следующими характеристиками
   - nginx работающий на 80 порту с поддержкой [nginx-статуса](http://nginx.org/ru/docs/http/ngx_http_stub_status_module.html) доступного на порту 8080 по адресу <http://127.0.0.1:8080/basic_status>
   - nginx-exporter отдающий метрики в формате prometheus на порту 9113
   - три реплики
 - ConfigMap с конфигурацией nginx
-- Service для доступа к нашим pods по необходимым портам и анотациями для prometheus
+- Service для доступа к нашим pods по необходимым портам
+- CR ServiceMonitor для мониторинга наших сервисов
+
+nginx-configMap.yaml
+
+```yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+data:
+  nginx.conf: |
+    user  nginx;
+    worker_processes  1;
+
+    error_log  /var/log/nginx/error.log warn;
+    pid        /var/run/nginx.pid;
+
+
+    events {
+        worker_connections  1024;
+    }
+
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+
+        keepalive_timeout  65;
+
+        server {
+            listen       80;
+            server_name  localhost;
+
+            location / {
+                root   /usr/share/nginx/html;
+                index  index.html index.htm;
+            }
+
+            error_page   500 502 503 504  /50x.html;
+            location = /50x.html {
+                root   /usr/share/nginx/html;
+            }
+        }
+        server {
+            listen       8080;
+            server_name  localhost;
+
+            location = /basic_status {
+                stub_status;
+                allow 127.0.0.1;
+                deny all;
+            }
+        }
+    }
+```
+
+nginx-deployment.yaml
+
+```yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx  
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.19.0-alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+          - name: nginx-config
+            mountPath: /etc/nginx/nginx.conf
+            subPath: nginx.conf
+      - name: nginx-exporter
+        image: nginx/nginx-prometheus-exporter:0.7.0
+        env:
+          - name: SCRAPE_URI
+            value: "http://127.0.0.1:8080/basic_status"
+          - name: NGINX_RETRIES
+            value: "10"
+        ports:
+        - containerPort: 9113
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+```
+
+nginx-nginx-service.yaml
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  selector:
+    app: nginx
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  - name: nginx-exporter
+    port: 9113
+    protocol: TCP
+    targetPort: 9113
+```
+
+nginx-serviceMonitor.yaml
+
+```yml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nginx-sm
+  namespace: default
+  labels:
+    release: prometheus-operator
+spec:
+  namespaceSelector:
+    matchNames:
+    - default 
+  selector:
+    matchLabels:
+      app: nginx
+  endpoints:
+  - port: nginx-exporter
+```
 
 Развернем:
 
@@ -28,6 +193,7 @@
 kubectl apply -f nginx-configMap.yaml
 kubectl apply -f nginx-deployment.yaml
 kubectl apply -f nginx-nginx-service.yaml
+kubectl apply -f nginx-serviceMonitor.yaml
 ```
 
 И проверим работу nginx-exporter:
@@ -71,93 +237,25 @@ nginx_up 1
 nginxexporter_build_info{gitCommit="a2910f1",version="0.7.0"} 1
 ```
 
-### kube-state-metrics (kubernetes-monitoring/kube-state-metrics)
+### Prometheus UI
 
-Подготовим манифесты kube-state-metrics:
-
-- cluster-role-binding.yaml
-- cluster-role.yaml
-- deployment.yaml
-- service-account.yaml
-- service.yaml
-
-Развернем в ns kube-system:
+Выполним:
 
 ```console
-kubectl apply -f service-account.yaml
-kubectl apply -f cluster-role.yaml
-kubectl apply -f cluster-role-binding.yaml
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
+kubectl port-forward service/prometheus-operator-prometheus -n monitoring 9090:9090
 ```
 
-И проверим:
+Далее заходим по адресу <http://127.0.0.1:9090/targets> и наблюдаем наши endpoints в default/nginx-sm в количестве трех реплик.
+
+### Grafana UI
+
+Выполним:
 
 ```console
-kubectl get pods -n kube-system -l app.kubernetes.io/name=kube-state-metrics
-NAME                                  READY   STATUS    RESTARTS   AGE
-kube-state-metrics-6dc5b5b496-78mds   1/1     Running   0          70m
+kubectl port-forward service/prometheus-operator-grafana  -n monitoring 8000:80
 ```
 
-### Prometheus (kubernetes-monitoring/prometheus)
-
-Подготовим манифесты Prometheus:
-
-- ns.yaml
-- clusterRole.yaml
-- clusterRoleBinding.yaml
-- configMap.yaml
-- deployment.yaml
-- service.yaml
-
-Развернем в ns monitoring:
-
-```console
-kubectl apply -f ns.yaml
-kubectl apply -f clusterRole.yaml
-kubectl apply -f clusterRoleBinding.yaml
-kubectl apply -f configMap.yaml
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-```
-
-И проверим:
-
-```console
-kubectl get pods -n monitoring
-NAME                                    READY   STATUS    RESTARTS   AGE
-prometheus-deployment-8dcdcf66b-t6lnd   1/1     Running   0          87m
-```
-
-### Grafana (kubernetes-monitoring/grafana)
-
-Подготовим манифесты Grafana:
-
-- configMap.yaml
-- deployment.yaml
-- service.yaml
-
-```console
-kubectl apply -f configMap.yaml
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-```
-
-И проверим:
-
-```console
-kubectl get pods -n monitoring
-NAME                                    READY   STATUS    RESTARTS   AGE
-grafana-9fc4bdfc5-xxt7l                 1/1     Running   0          87m
-prometheus-deployment-8dcdcf66b-t6lnd   1/1     Running   0          87m
-
-kubectl get svc -n monitoring
-NAME                 TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)          AGE
-grafana              NodePort   10.100.47.218   <none>        3000:32000/TCP   11h
-prometheus-service   NodePort   10.111.99.254   <none>        8080:30000/TCP   12h
-```
-
-Далее зайдем в Grafana по адресу нашей ноды и порту 32000 и импортируем [dashboard](https://github.com/nginxinc/nginx-prometheus-exporter/tree/master/grafana).
+Далее зайдем в Grafana по адресу <http://127.0.0.1:8000/> используя логин/пароль admin/prom-operator и импортируем [dashboard](https://github.com/nginxinc/nginx-prometheus-exporter/tree/master/grafana).
 
 Теперь мы можем наблюдать статусы наших nginx и необходимые нам метрики:
 
