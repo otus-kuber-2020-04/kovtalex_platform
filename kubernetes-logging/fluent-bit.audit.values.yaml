@@ -1,0 +1,25 @@
+backend:
+  type: es
+  es:
+    host: elasticsearch-master
+
+audit:
+  enable: true
+  input:
+    memBufLimit: 35MB
+    parser: docker
+    tag: audit.*
+    path: /var/log/kube-audit/audit.log
+    bufferChunkSize: 2MB
+    bufferMaxSize: 10MB
+    skipLongLines: On
+    key: kubernetes-audit
+
+rawConfig: |
+  @INCLUDE fluent-bit-service.conf
+  @INCLUDE fluent-bit-input.conf
+  @INCLUDE fluent-bit-filter.conf
+  @INCLUDE fluent-bit-output.conf
+
+tolerations:
+  - operator: Exists
