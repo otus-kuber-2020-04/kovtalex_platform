@@ -446,6 +446,18 @@ fluent-bit is now running.
 It will forward all container logs to the svc named elasticsearch-master on port: 9200
 ```
 
+Установка EFK стека | Задание со ⭐
+
+Для решения проблемы с дублирующими полями изменим наш fluent-bit.values.yaml:
+
+- Уберем секцию удаления полей time и timestamp
+- Добавим **mergeLogKey: "app"** - это добавление префикса к полям из json
+
+```yml
+filter:
+    mergeLogKey: "app"
+```
+
 ### Мониторинг ElasticSearch
 
 Помимо установки ElasticSearch, важно отслеживать его показатели и вовремя понимать, что пора предпринять какие-либо
@@ -1034,6 +1046,49 @@ sudo docker stop $(sudo docker ps | grep k8s_kube-apiserver | awk '{print $1}')
 ```console
 _source:
 kind:Event @timestamp:Jun 8, 2020 @ 01:12:18.763 apiVersion:audit.k8s.io/v1 level:Metadata auditID:83490317-c0c2-4a30-9726-77ca7b37c47b stage:RequestReceived requestURI:/apis/coordination.k8s.io/v1/namespaces/kube-system/leases/kube-scheduler?timeout=10s verb:update user.username:system:kube-scheduler user.groups:system:authenticated sourceIPs:10.2.1.2 userAgent:kube-scheduler/v1.18.3 (linux/amd64) kubernetes/2e7996e/leader-election objectRef.resource:leases objectRef.namespace:kube-system objectRef.name:kube-
+```
+
+### Host logging | Задание со ⭐
+
+- На текущий момент мы лишены возможности централизованного просмотра логов с виртуальных машин, на которых запущен Kubernetes
+- Модернизируем конфигурацию fluent-bit таким образом, чтобы данные логи отображались в ElasticSearch
+
+Добавим в наш fluent-bit.audit.values.yaml:
+
+```yml
+  [INPUT]
+      Name         Tail
+      Path         /var/log/syslog
+      Path_Key     log_file
+      DB           /run/fluent-bit-messages.state
+      Parser       syslog-rfc3164
+  [INPUT]
+      Name         Tail
+      Path         /var/log/kern.log
+      Path_Key     log_file
+      DB           /run/fluent-bit-kern.state
+      Parser       syslog-rfc3164
+
+  [INPUT]
+      Name         Tail
+      Path         /var/log/auth.log
+      Path_Key     log_file
+      DB           /run/fluent-bit-auth.state
+      Parser       syslog-rfc3164
+
+  [INPUT]
+      Name         Tail
+      Path         /var/log/docker.log
+      Path_Key     log_file
+      DB           /run/fluent-bit-docker.state
+      Parser       docker-daemon
+```
+
+Применим и сможем наблюдать в Kibana логи с хостов (к примеру syslog)
+
+```console
+_source:
+log_file:/var/log/syslog @timestamp:Jun 8, 2020 @ 15:13:32.648 log:Jun 8 13:13:32 master2 kubelet[1111]: E0608 13:13:32.646400 1111 file.go:187] Can't process manifest file "/etc/kubernetes/manifests/kube-apiserver.yaml": invalid pod: [spec.containers[0].volumeMounts[5].mountPath: Invalid value: "/usr/share/ca-certificates": must be unique] _id:8doQlHIBJSoEJCXikBpI _type:flb_type _index:kubernetes_cluster-2020.06.08 _score: -
 ```
 
 ## Мониторинг сервиса в кластере k8s

@@ -3,6 +3,10 @@ backend:
   es:
     host: elasticsearch-master
 
+filter:
+  mergeJSONLog: true
+  mergeLogKey: "app"
+
 tolerations:
   - key: node-role
     operator: Equal
@@ -14,9 +18,3 @@ rawConfig: |
   @INCLUDE fluent-bit-input.conf
   @INCLUDE fluent-bit-filter.conf
   @INCLUDE fluent-bit-output.conf
-
-  [FILTER]
-      Name modify
-      Match *
-      Remove time
-      Remove @timestamp

@@ -8,7 +8,7 @@ audit:
   input:
     memBufLimit: 35MB
     parser: docker
-    tag: audit.*
+    tag: kube-audit.*
     path: /var/log/kube-audit/audit.log
     bufferChunkSize: 2MB
     bufferMaxSize: 10MB
@@ -18,6 +18,32 @@ audit:
 rawConfig: |
   @INCLUDE fluent-bit-service.conf
   @INCLUDE fluent-bit-input.conf
+  [INPUT]
+      Name         Tail
+      Path         /var/log/syslog
+      Path_Key     log_file
+      DB           /run/fluent-bit-messages.state
+      Parser       syslog-rfc3164
+  [INPUT]
+      Name         Tail
+      Path         /var/log/kern.log
+      Path_Key     log_file
+      DB           /run/fluent-bit-kern.state
+      Parser       syslog-rfc3164
+
+  [INPUT]
+      Name         Tail
+      Path         /var/log/auth.log
+      Path_Key     log_file
+      DB           /run/fluent-bit-auth.state
+      Parser       syslog-rfc3164
+
+  [INPUT]
+      Name         Tail
+      Path         /var/log/docker.log
+      Path_Key     log_file
+      DB           /run/fluent-bit-docker.state
+      Parser       docker-daemon
   @INCLUDE fluent-bit-filter.conf
   @INCLUDE fluent-bit-output.conf
 
