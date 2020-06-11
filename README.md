@@ -1,5 +1,16 @@
 # kovtalex_platform
 
+## Hashicorp Vault + K8s
+
+### Инсталляция hashicorp vault HA в k8s
+
+```console
+helm repo add hashicorp https://helm.releases.hashicorp.com
+
+helm upgrade --install consul hashicorp/consul
+helm upgrade --install vault hashicorp/vault
+```
+
 ## Сервисы централизованного логирования для компонентов Kubernetes и приложений
 
 ### Подготовка Kubernetes кластера
