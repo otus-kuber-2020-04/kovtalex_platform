@@ -3,4 +3,4 @@ path "otus/otus-ro/*" {
 }
 path "otus/otus-rw/*" {
     capabilities = ["read", "create", "update", "list"]
-} 
+}
