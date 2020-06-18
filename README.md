@@ -455,7 +455,7 @@ TOKEN=$(curl -k -s --request POST --data '{"jwt": "'$KUBE_TOKEN'", "role": "otus
 - Проверим чтение
 
 ```console
-curl --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otus-ro/config | jq
+curl --header "X-Vault-Token:$TOKEN" $VAULT_ADDR/v1/otus/otus-ro/config | jq
 {
   "request_id": "3a29647c-8e75-4d56-7ed9-d641819c2dda",
   "lease_id": "",
@@ -470,7 +470,7 @@ curl --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otu
   "auth": null
 }
 
-curl --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otus-rw/config | jq
+curl --header "X-Vault-Token:$TOKEN" $VAULT_ADDR/v1/otus/otus-rw/config | jq
 {
   "request_id": "48e1eab4-ebd5-b109-4fe7-ac080e7118c3",
   "lease_id": "",
@@ -501,11 +501,11 @@ curl --request POST --data '{"bar": "baz"}' --header "X-Vault-Token:s.SCbMdIL61r
 - Проверим запись в otus-ro/config1
 
 ```console
-curl --request POST --data '{"bar": "baz"}' --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otus-rw/config1 | jq
+curl --request POST --data '{"bar": "baz"}' --header "X-Vault-Token:$TOKEN" $VAULT_ADDR/v1/otus/otus-rw/config1 | jq
 ```
 
 ```console
-curl --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otus-rw/config1 | jq
+curl --header "X-Vault-Token:$TOKEN" $VAULT_ADDR/v1/otus/otus-rw/config1 | jq
 {
   "request_id": "922fb606-f383-ecf6-6173-06ef2e9c3fcc",
   "lease_id": "",
@@ -523,7 +523,7 @@ curl --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otu
 - Проверим запись в otus-ro/config1
 
 ```console
-curl --request POST --data '{"bar": "baz"}' --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otus-rw/config | jq
+curl --request POST --data '{"bar": "baz"}' --header "X-Vault-Token:$TOKEN" $VAULT_ADDR/v1/otus/otus-rw/config | jq
 
 {
   "errors": [
@@ -557,9 +557,9 @@ Success! Uploaded policy: otus-policy
 - И попробуем снова записать:
 
 ```console
-curl --request POST --data '{"bar": "baz"}' --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otus-rw/config | jq
+curl --request POST --data '{"bar": "baz"}' --header "X-Vault-Token:$TOKEN" $VAULT_ADDR/v1/otus/otus-rw/config | jq
 
-curl --header "X-Vault-Token:s.SCbMdIL61rqmyqrCUldd1ocw" $VAULT_ADDR/v1/otus/otus-rw/config | jq
+curl --header "X-Vault-Token:$TOKEN" $VAULT_ADDR/v1/otus/otus-rw/config | jq
 {
   "request_id": "509645a1-bd6a-704e-c663-2d94ef465176",
   "lease_id": "",
@@ -694,7 +694,7 @@ Success! Enabled the pki secrets engine at: pki/
 kubectl exec -it vault-0 -- vault secrets tune -max-lease-ttl=87600h pki
 Success! Tuned the secrets engine at: pki/\
 
-kubectl exec -it vault-0 -- vault write -field=certificate pki/root/generate/internal common_name="exmaple.ru" ttl=87600h > CA_cert.crt
+kubectl exec -it vault-0 -- vault write -field=certificate pki/root/generate/internal common_name="example.ru" ttl=87600h > CA_cert.crt
 ```
 
 ### Пропишем урлы для ca и отозванных сертификатов
@@ -706,6 +706,7 @@ Success! Data written to: pki/config/urls
 
 ### Создадим промежуточный сертификат
 
+```console
 kubectl exec -it vault-0 -- vault secrets enable --path=pki_int pki
 Success! Enabled the pki secrets engine at: pki_int/
 
@@ -713,6 +714,7 @@ kubectl exec -it vault-0 -- vault secrets tune -max-lease-ttl=87600h pki_int
 Success! Tuned the secrets engine at: pki_int/
 
 kubectl exec -it vault-0 -- vault write -format=json pki_int/intermediate/generate/internal common_name="example.ru Intermediate Authority" | jq -r '.data.csr' > pki_intermediate.csr
+```
 
 ### Пропишем промежуточный сертификат в vault
 
@@ -972,6 +974,73 @@ curl --cacert ca.crt  -H "X-Vault-Token: s.Q4JOojZtdGgfiwoxJ4L3v75w" -X GET http
   "auth": null
 }
 ```
+
+### Настроить автообновление сертификатов
+
+- Запустим nginx
+- Реализуем автообнвление сертификатов для nginx c помощью vault-inject
+
+Подготовим policy:
+
+pki-policy.hcl
+
+```json
+path "pki_int/issue/*" {
+    capabilities = ["create", "read", "update", "list"]
+}
+```
+
+Применим:
+
+```console
+kubectl cp nginx/nginx-policy.hcl vault-0:/home/vault
+kubectl exec -it vault-0 -- vault policy write nginx-policy /home/vault/nginx-policy.hcl
+Success! Uploaded policy: pki-policy
+
+kubectl exec -it vault-0 -- vault write auth/kubernetes/role/nginx-role \
+        bound_service_account_names=vault-auth \
+        bound_service_account_namespaces=default policies=nginx-policy ttl=24h
+```
+
+Добавим анотации в нашему поду:
+
+```yml
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/agent-inject-status: "update"
+        vault.hashicorp.com/role: "nginx-role"
+        vault.hashicorp.com/agent-inject-secret-server.cert: "pki_int/issue/example-dot-ru"
+        vault.hashicorp.com/agent-inject-template-server.cert: |
+          {{- with secret "pki_int/issue/example-dot-ru" "common_name=nginx.example.ru" "ttl=2m" -}}
+          {{ .Data.certificate }}
+          {{- end }}
+        vault.hashicorp.com/agent-inject-secret-server.key: "pki_int/issue/example-dot-ru"
+        vault.hashicorp.com/agent-inject-template-server.key: |
+          {{- with secret "pki_int/issue/example-dot-ru" "common_name=nginx.example.ru" "ttl=2m" -}}
+          {{ .Data.private_key }}
+          {{- end }}
+        vault.hashicorp.com/service: "http://vault:8200"
+        vault.hashicorp.com/agent-inject-command-server.key: "/bin/sh -c 'pkill -HUP nginx || true'"
+```
+
+> Описание [анотаций](https://www.vaultproject.io/docs/platform/k8s/injector/annotations)
+
+Применим:
+
+```console
+kubectl apply -f nginx/nginx-configMap.yaml -f nginx/nginx-service.yaml -f nginx/nginx-deployment.yaml
+configmap/nginx-config created
+service/nginx created
+deployment.apps/nginx created
+
+kubectl get pods -l app=nginx
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-65744668b8-2bppr   2/2     Running   0          49s
+```
+
+Демонстрация рефреша:
+
+![pic1](kubernetes-vault/pic1.png)![pic2](kubernetes-vault/pic2.png)
 
 ## Сервисы централизованного логирования для компонентов Kubernetes и приложений
 
