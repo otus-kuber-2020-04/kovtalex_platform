@@ -1,0 +1,21 @@
+[ req ]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+req_extensions = v3_ext
+[ dn ]
+commonName = localhost
+stateOrProvinceName = Moscow
+countryName = RU
+emailAddress = lucky@perflabs.org
+organizationName = Perflabs
+organizationalUnitName = Development
+[ v3_ext ]
+basicConstraints = CA:FALSE
+keyUsage = keyEncipherment,dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.0 = localhost
+DNS.1 = vault
