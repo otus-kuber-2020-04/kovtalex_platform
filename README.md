@@ -1042,6 +1042,259 @@ nginx-65744668b8-2bppr   2/2     Running   0          49s
 
 ![pic1](kubernetes-vault/pic1.png)![pic2](kubernetes-vault/pic2.png)
 
+### Настройка autounseal | Задание со ⭐
+
+Настроим autounseal с помощью GCP Cloud KMS
+
+Воспользуемся документациями: <https://www.vaultproject.io/docs/platform/k8s/helm/run#google-kms-auto-unseal> и <https://www.vaultproject.io/docs/configuration/seal/gcpckms>
+
+- Требования:
+  - Наличие [Cloud IAM Service Account](https://cloud.google.com/docs/authentication/getting-started)
+  - Включенного [Cloud KMS API](https://cloud.google.com/apis/docs/enable-disable-apis) и созданных key ring и crypto key
+
+- Создадим secret из экспортированного json для service account
+
+```console
+kubectl create secret generic kms-creds --from-file=/Users/alexey/gcp_sa.json
+```
+
+- Развернем consul
+
+```console
+helm upgrade --install consul hashicorp/consul
+Release "consul" does not exist. Installing it now.
+NAME: consul
+LAST DEPLOYED: Sat Jun 20 02:48:12 2020
+NAMESPACE: default
+STATUS: deployed
+REVISION: 1
+NOTES:
+Thank you for installing HashiCorp Consul!
+
+Now that you have deployed Consul, you should look over the docs on using 
+Consul with Kubernetes available here: 
+
+https://www.consul.io/docs/platform/k8s/index.html
+
+
+Your release is named consul.
+
+To learn more about the release if you are using Helm 2, run:
+
+  $ helm status consul
+  $ helm get consul
+
+To learn more about the release if you are using Helm 3, run:
+
+  $ helm status consul
+  $ helm get all consul
+```
+
+```console
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+consul-consul-477ww      1/1     Running   0          54s
+consul-consul-7cbdz      1/1     Running   0          54s
+consul-consul-nqjhr      1/1     Running   0          54s
+consul-consul-server-0   1/1     Running   0          54s
+consul-consul-server-1   1/1     Running   0          54s
+consul-consul-server-2   1/1     Running   0          54s
+```
+
+- Подготовим vault-kms.vault.yaml
+
+```yml
+server:  
+  standalone:
+    enabled: false
+
+  extraEnvironmentVars:
+    GOOGLE_REGION: global
+    GOOGLE_PROJECT: angular-pursuit-275120
+    GOOGLE_APPLICATION_CREDENTIALS: /vault/userconfig/kms-creds/gcp_sa.json
+
+  extraVolumes:
+    - type: 'secret'
+      name: 'kms-creds'
+
+  ha:
+    enabled: true
+
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable = 1
+        address = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+
+      seal "gcpckms" {
+        project     = "angular-pursuit-275120"
+        region      = "global"
+        key_ring    = "vault"
+        crypto_key  = "vault"
+      }
+
+      storage "consul" {
+        path = "vault"
+        address = "HOST_IP:8500"
+      }
+
+ui:
+  enabled: true
+```
+
+- Развернет Vault и убедимся, что он запечатан
+
+```console
+helm upgrade --install vault hashicorp/vault -f vault-kms.values.yamlRelease "vault" does not exist. Installing it now.
+NAME: vault
+LAST DEPLOYED: Sat Jun 20 02:50:12 2020
+NAMESPACE: default
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Thank you for installing HashiCorp Vault!
+
+Now that you have deployed Vault, you should look over the docs on using
+Vault with Kubernetes available here:
+
+https://www.vaultproject.io/docs/
+
+
+Your release is named vault. To learn more about the release, try:
+
+  $ helm status vault
+  $ helm get vault
+```
+
+```console
+kubectl get pods
+NAME                                    READY   STATUS    RESTARTS   AGE
+consul-consul-477ww                     1/1     Running   0          2m22s
+consul-consul-7cbdz                     1/1     Running   0          2m22s
+consul-consul-nqjhr                     1/1     Running   0          2m22s
+consul-consul-server-0                  1/1     Running   0          2m22s
+consul-consul-server-1                  1/1     Running   0          2m22s
+consul-consul-server-2                  1/1     Running   0          2m22s
+vault-0                                 0/1     Running   0          22s
+vault-1                                 0/1     Running   0          22s
+vault-2                                 0/1     Running   0          22s
+vault-agent-injector-7895bcdb5f-g76dl   1/1     Running   0          22s
+```
+
+```console
+kubectl exec -it vault-0 -- vault status
+Key                      Value
+---                      -----
+Recovery Seal Type       gcpckms
+Initialized              false
+Sealed                   true
+Total Recovery Shares    0
+Threshold                0
+Unseal Progress          0/0
+Unseal Nonce             n/a
+Version                  n/a
+HA Enabled               true
+```
+
+- Инициализируем
+
+```console
+kubectl exec -it vault-0 -- vault operator init
+Recovery Key 1: WAH2rssyDCo48EQE0cB/WC5J4YVxF/X085oUrmgtS0eI
+Recovery Key 2: iI5HPHKTulARtMmwMr+Q1Y5Bq69cV3R1p+uokmWg8MDT
+Recovery Key 3: goWiBRqrKv4jO/kb63VX5EIhhNDg5D9bY0wIvImZ2f7l
+Recovery Key 4: +f27e1PSc9ikNLV2Y6sjfAhP09p3W3LrFDHC9oj7Vj/L
+Recovery Key 5: n6ADeDlFF1urLGmTIpw+KyM+6og72AhrMVSPTn+Yh1HZ
+
+Initial Root Token: s.GpC6pYApLBC9SOY1RNtfAyHx
+
+Success! Vault is initialized
+
+Recovery key initialized with 5 key shares and a key threshold of 3. Please
+securely distribute the key shares printed above.
+```
+
+- Vault автоматом распечатается
+
+```console
+kubectl exec -it vault-0 -- vault status
+Key                      Value
+---                      -----
+Recovery Seal Type       shamir
+Initialized              true
+Sealed                   false
+Total Recovery Shares    5
+Threshold                3
+Version                  1.4.2
+Cluster Name             vault-cluster-ec859e31
+Cluster ID               aa2f86b0-8ced-a80f-0c3a-4127ffb78f78
+HA Enabled               true
+HA Cluster               https://vault-0.vault-internal:8201
+HA Mode                  active
+```
+
+```console
+kubectl get pods
+NAME                                    READY   STATUS    RESTARTS   AGE
+consul-consul-477ww                     1/1     Running   0          4m23s
+consul-consul-7cbdz                     1/1     Running   0          4m23s
+consul-consul-nqjhr                     1/1     Running   0          4m23s
+consul-consul-server-0                  1/1     Running   0          4m23s
+consul-consul-server-1                  1/1     Running   0          4m23s
+consul-consul-server-2                  1/1     Running   0          4m23s
+vault-0                                 1/1     Running   0          2m23s
+vault-1                                 1/1     Running   0          2m23s
+vault-2                                 1/1     Running   0          2m23s
+vault-agent-injector-7895bcdb5f-g76dl   1/1     Running   0          2m23s
+```
+
+- Удалим поды
+
+```console
+kubectl delete pods -l app.kubernetes.io/name=vault
+pod "vault-0" deleted
+pod "vault-1" deleted
+pod "vault-2" deleted
+```
+
+- После пересоздания подов Vault будет автоматически распечатан
+
+```console
+kubectl exec -it vault-0 -- vault status
+Key                      Value
+---                      -----
+Recovery Seal Type       shamir
+Initialized              true
+Sealed                   false
+Total Recovery Shares    5
+Threshold                3
+Version                  1.4.2
+Cluster Name             vault-cluster-ec859e31
+Cluster ID               aa2f86b0-8ced-a80f-0c3a-4127ffb78f78
+HA Enabled               true
+HA Cluster               https://vault-0.vault-internal:8201
+HA Mode                  active
+```
+
+```console
+kubectl get pods
+NAME                                    READY   STATUS    RESTARTS   AGE
+consul-consul-477ww                     1/1     Running   0          5m11s
+consul-consul-7cbdz                     1/1     Running   0          5m11s
+consul-consul-nqjhr                     1/1     Running   0          5m11s
+consul-consul-server-0                  1/1     Running   0          5m11s
+consul-consul-server-1                  1/1     Running   0          5m11s
+consul-consul-server-2                  1/1     Running   0          5m11s
+vault-0                                 1/1     Running   0          22s
+vault-1                                 1/1     Running   0          22s
+vault-2                                 1/1     Running   0          22s
+vault-agent-injector-7895bcdb5f-g76dl   1/1     Running   0          3m11s
+```
+
 ## Сервисы централизованного логирования для компонентов Kubernetes и приложений
 
 ### Подготовка Kubernetes кластера
