@@ -23,7 +23,7 @@ git remote remove origin
 - Можно воспользоваться наработками из предыдущих домашних заданий, либо скопировать готовые чарты из [демонстрационного репозитория](https://gitlab.com/express42/kubernetes-platform-demo/microservices-demo/) (директория deploy/charts)
 - Во всех манифестах, описывающих deployment, обязательно должны быть параметризованы **название образа** и его **тег**. Рекомендуется придерживаться следующего формата:
 
-Результат поместите в директорию deploy/charts. Должен получиться следующий вывод:
+Результат поместим в директорию deploy/charts. Должен получиться следующий вывод:
 
 ```console
 tree -L 1 deploy/charts
@@ -93,10 +93,17 @@ istio-telemetry-58769bf595-t5sw6                2/2     Running     2          5
 promsd-696bcc5b96-tm44r                         2/2     Running     1          5m29s
 ```
 
+### Подготовка Kubernetes кластера | Задание со ⭐
+
+- Автоматизировано создание Kubernetes кластера
+- Кластер разворачиваться после запуска pipeline в GitLab для окружения dev и prod
+
+Cсылка: <https://gitlab.com/kovtalex-repo/microservices-demo/base-layer>
+
 ### Continuous Integration
 
-- Соберем Docker образы для всех микросервиса и поместите данные образы в Docker Hub
-- При тегировании образов используйте подход [semver](https://semver.org/), например, первому собранному образу логично выставить тег [v0.0.1](https://semver.org/#is-v123-a-semantic-version)
+- Соберем Docker образы для всех микросервиса и поместим данные образы в Docker Hub
+- При тегировании образов используем подход [semver](https://semver.org/), например, первому собранному образу логично выставить тег [v0.0.1](https://semver.org/#is-v123-a-semantic-version)
 
 > После выполнения данного шага в Docker Hub должно находиться как минимум по одному образу для каждого микросервиса
 
@@ -106,6 +113,21 @@ promsd-696bcc5b96-tm44r                         2/2     Running     1          5
 make
 make release
 ```
+
+### Continuous Integration | Задание со ⭐
+
+Подготовлен простой pipeline, который состоит из стадии сборки Docker образа для каждого из микросервисов и Push данного образа в Docker Hub.
+
+В качестве тега образа используется tag коммита, инициирующего сборку (переменная CI_COMMIT_TAG в GitLab CI)
+
+Предварительно требуется прописать следующие переменные окружения в Gitlab:
+
+- CI_REGISTRY_USER - Docker ID
+- CI_TOKEN - Docker token
+
+[.gitlab-ci.yaml](https://gitlab.com/kovtalex/microservices-demo/-/raw/master/.gitlab-ci.yml)
+
+<https://gitlab.com/kovtalex/microservices-demo>
 
 ### Flux
 
@@ -222,7 +244,7 @@ export FLUX_FORWARD_NAMESPACE=flux
 Пришло время проверить корректность работы Flux. Как мы уже знаем, Flux умеет автоматически синхронизировать состояние кластера и репозитория. Это касается не только сущностей HelmRelease, которыми
 мы будем оперировать для развертывания приложения, но и обыкновенных манифестов.
 
-Поместим манифест, описывающий namespace microservices-demo в директорию deploy/namespaces и сделайте push в GitLab:
+Поместим манифест, описывающий namespace microservices-demo в директорию deploy/namespaces и сделаем push в GitLab:
 
 ```yml
 apiVersion: v1
@@ -1030,7 +1052,7 @@ NAME               GATEWAYS     HOSTS                                           
 frontend-boutique   [frontend]   [frontend.34.78.81.2.xip.io frontend-boutique]   17m
 ```
 
-Попробуем провести релиз. Соберите новый образ frontend с тегом v0.0.3 и сделайте push в Docker Hub.
+Попробуем провести релиз. Соберем новый образ frontend с тегом v0.0.3 и сделаем push в Docker Hub.
 
 ```console
 make APP_TAG=v0.0.3 build_frontend release_frontend
@@ -1272,7 +1294,7 @@ HA Enabled         true
 
 ### Распечатаем vault
 
-- Обратите внимание на переменные окружения в подах
+- Обратим внимание на переменные окружения в подах
 
 ```console
 kubectl exec -it vault-0 env | grep VAULT_ADDR
@@ -10111,7 +10133,7 @@ Events:
 **Init контейнеры** описываются аналогично обычным контейнерам в pod. Добавим в манифест web-pod.yaml описание init контейнера, соответствующее следующим требованиям:
 
 - **image** init контейнера должен содержать **wget** (например, можно использовать busybox:1.31.0 или любой другой busybox актуальной версии)
-- command init контейнера (аналог ENTRYPOINT в Dockerfile) укажите следующую:
+- command init контейнера (аналог ENTRYPOINT в Dockerfile) укажем следующую:
 
 ```console
 ['sh', '-c', 'wget -O- https://tinyurl.com/otus-k8s-intro | sh']
@@ -10159,7 +10181,7 @@ spec: # Описание Pod
 
 ### Запуск pod
 
-Удалим запущенный pod web из кластера **kubectl delete pod web** и примените обновленный манифест web-pod.yaml
+Удалим запущенный pod web из кластера **kubectl delete pod web** и применим обновленный манифест web-pod.yaml
 
 Отслеживать происходящее можно с использованием команды **kubectl get pods -w**
 
@@ -10217,7 +10239,7 @@ kubectl run frontend --image kovtalex/hipster-frontend:v0.0.1 --restart=Never
 
 - **kubectl run** - запустить ресурс
 - **frontend** - с именем frontend
-- **--image** - из образа kovtalex/hipster-frontend:v0.0.1 (подставьте свой образ)
+- **--image** - из образа kovtalex/hipster-frontend:v0.0.1 (подставим свой образ)
 - **--restart=Never** указываем на то, что в качестве ресурса запускаем pod. [Подробности](https://kubernetes.io/docs/reference/kubectl/conventions/)
 
 Один из распространенных кейсов использования ad-hoc режима - генерация манифестов средствами kubectl:
