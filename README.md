@@ -4,18 +4,18 @@
 
 ### Развертывание k8s-кластер, к которому добавляется хранилище на iSCSI и проверка работы snapshots | Задание со ⭐
 
-Полезные ссылки:
+Полезные ссылки:  
 <https://github.com/kubernetes/examples/tree/master/volumes/iscsi>
 <https://www.saqwel.ru/articles/linux/nastrojka-linux-iscsi-posredstvom-targetcli/>
 <https://kifarunix.com/how-to-install-and-configure-iscsi-storage-server-on-ubuntu-18-04/>
 
 #### Настройка vm хранилища (centos)
 
-- На vm для iscsi хранилища добавляем дополниельный диск на 200Гб
+- На vm для iscsi хранилища добавляем дополнительный диск на 200Гб
 - Добавляем второй сетевой интерфейс для трафика хранилища
 
 Выключаем SELinux: disabled > /etc/sysconfig/selinux  
-> Если не перезагрузилисть то: setenforce 0
+> Если не перезагрузились то: setenforce 0
 
 Выключаем firewall
 
@@ -37,7 +37,7 @@ systemctl enable target
 systemctl start target
 ````
 
-Создани physical volume
+Создание physical volume
 
 ```console
 pvcreate /dev/sdb
@@ -90,7 +90,7 @@ vgs
   vg-targetd                 1   0   0 wz--n- <200.00g <200.00g
 ```
 
-Создаем logican volume
+Создаем logical volume
 
 ```console
 lvcreate -L1024 -n lv01 vg-targetd
@@ -333,7 +333,7 @@ NAME                READY   STATUS    RESTARTS   AGE
 pod/iscsi-pv-pod1   1/1     Running   0          97s
 ```
 
-Проверяем, что данные из snapshot успешно востановились
+Проверяем, что данные из snapshot успешно восстановились
 
 ```console
 kubectl exec -it iscsi-pv-pod1 /bin/sh
@@ -347,13 +347,13 @@ Hello!
 
 ### Теперь о динамическом провижинге
 
-Полезные ссылки:
+Полезные ссылки:  
 <https://github.com/kubernetes-incubator/external-storage/tree/master/iscsi/targetd>
 <https://ansilh.com/17-persistent_volumes/02-iscsi-provisioner/>
 
 #### На vm iscsi хранилища
 
-- volume group берем из предущего раздела
+- volume group берем из предыдущего раздела описания
 - удаляем старые lv
 
 Настраиваем targetd
@@ -399,7 +399,7 @@ namespace/iscsi-provisioner created
 kubectl create secret generic targetd-account --from-literal=username=admin --from-literal=password=password -n iscsi-provisioner
 ```
 
-Применяем машифесты провижинера
+Применяем манифесты провижинера
 
 ```console
 kubectl apply -f iscsi-provisioner-d.yaml -n iscsi-provisioner
