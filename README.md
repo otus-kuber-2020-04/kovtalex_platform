@@ -1,39 +1,486 @@
 # kovtalex_platform
 
-https://hub.helm.sh/charts/argo/argo-cd
+## CSI
 
-helm repo add argo https://argoproj.github.io/argo-helm
-helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace
-Release "argocd" does not exist. Installing it now.
-manifest_sorter.go:192: info: skipping unknown hook: "crd-install"
-manifest_sorter.go:192: info: skipping unknown hook: "crd-install"
-NAME: argocd
-LAST DEPLOYED: Wed Jul  1 15:53:14 2020
-NAMESPACE: argocd
-STATUS: deployed
-REVISION: 1
-TEST SUITE: None
-NOTES:
-In order to access the server UI you have the following options:
+### Развертывание k8s-кластер, к которому добавляется хранилище на iSCSI и проверка работы snapshots | Задание со ⭐
 
-1. kubectl port-forward service/argocd-server -n argocd 8080:443
+Полезные ссылки:
+<https://github.com/kubernetes/examples/tree/master/volumes/iscsi>
+<https://www.saqwel.ru/articles/linux/nastrojka-linux-iscsi-posredstvom-targetcli/>
+<https://kifarunix.com/how-to-install-and-configure-iscsi-storage-server-on-ubuntu-18-04/>
 
-    and then open the browser on http://localhost:8080 and accept the certificate
+#### Настройка vm хранилища (centos)
 
-2. enable ingress in the values file `service.ingress.enabled` and either
-      - Add the annotation for ssl passthrough: https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/ingress.md#option-1-ssl-passthrough
-      - Add the `--insecure` flag to `server.extraArgs` in the values file and terminate SSL at your ingress: https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/ingress.md#option-2-multiple-ingress-objects-and-hosts
+- На vm для iscsi хранилища добавляем дополниельный диск на 200Гб
+- Добавляем второй сетевой интерфейс для трафика хранилища
+
+Выключаем SELinux: disabled > /etc/sysconfig/selinux  
+> Если не перезагрузилисть то: setenforce 0
+
+Выключаем firewall
+
+```console
+systemctl disable firewalld
+systemctl stop firewalld
+```
+
+Устанавливаем targetcli и targetd (рассмотрим в следующем разделе)
+
+```console
+yum install -f targetcli targetd
+````
+
+Сделаем доступным демона (службу) target и запустить его
+
+```console
+systemctl enable target
+systemctl start target
+````
+
+Создани physical volume
+
+```console
+pvcreate /dev/sdb
+  Physical volume "/dev/sdb" successfully created.
+
+pvdisplay
+  "/dev/sdb" is a new physical volume of "200.00 GiB"
+  --- NEW Physical volume ---
+  PV Name               /dev/sdb
+  VG Name
+  PV Size               200.00 GiB
+  Allocatable           NO
+  PE Size               0
+  Total PE              0
+  Free PE               0
+  Allocated PE          0
+  PV UUID               DFvQro-J3FV-xMsW-gRqX-flHE-Gqne-hsdneM
+```
+
+Создаем volume group
+
+```console
+vgcreate vg-targetd /dev/sdb
+  Volume group "vg-targetd" successfully created
+
+vgdisplay
+  --- Volume group ---
+  VG Name               vg-targetd
+  System ID
+  Format                lvm2
+  Metadata Areas        1
+  Metadata Sequence No  1
+  VG Access             read/write
+  VG Status             resizable
+  MAX LV                0
+  Cur LV                0
+  Open LV               0
+  Max PV                0
+  Cur PV                1
+  Act PV                1
+  VG Size               <200.00 GiB
+  PE Size               4.00 MiB
+  Total PE              51199
+  Alloc PE / Size       0 / 0
+  Free  PE / Size       51199 / <200.00 GiB
+  VG UUID               ZGVJ7J-DQ2N-SlTZ-O8mq-mTlA-6Arh-gQFG3a
+
+vgs
+  VG                       #PV #LV #SN Attr   VSize    VFree
+  vg-targetd                 1   0   0 wz--n- <200.00g <200.00g
+```
+
+Создаем logican volume
+
+```console
+lvcreate -L1024 -n lv01 vg-targetd
+ Logical volume "lv01" created.
+
+lvs
+  LV   VG                       Attr       LSize  Pool Origin Data%  Meta%  Move Log Cpy%Sync Convert
+  lv01 vg-targetd               -wi-a-----  1.00g
+```
+
+Настраиваем iscsi target через targetcli
+
+```console
+targetcli
+targetcli shell version 2.1.fb49
+Copyright 2011-2013 by Datera, Inc and others.
+For help on commands, type 'help'.
+/> ls
+o- / ......................................................................................................................... [...]
+  o- backstores .............................................................................................................. [...]
+  | o- block .................................................................................................. [Storage Objects: 0]
+  | o- fileio ................................................................................................. [Storage Objects: 0]
+  | o- pscsi .................................................................................................. [Storage Objects: 0]
+  | o- ramdisk ................................................................................................ [Storage Objects: 0]
+  o- iscsi ............................................................................................................ [Targets: 0]
+  o- loopback ......................................................................................................... [Targets: 0]
+
+/> /backstores/block create storage1 /dev/vg-targetd/lv01
+Created block storage object storage1 using /dev/vg-targetd/lv01.
+
+/> iscsi/ create iqn.2020-07.local.neclab:dev-storage-iscsi
+Created target iqn.2020-07.local.neclab:dev-storage-iscsi.
+Created TPG 1.
+Global pref auto_add_default_portal=true
+Created default portal listening on all IPs (0.0.0.0), port 3260.
+
+/> /iscsi/iqn.2020-07.local.neclab:dev-storage-iscsi/tpg1/luns/ create /backstores/block/storage1
+Created LUN 0.
+
+/> /iscsi/iqn.2020-07.local.neclab:dev-storage-iscsi/tpg1/acls create iqn.2020-07.local.neclab:dev-worker1
+Created Node ACL for iqn.2020-07.local.neclab:dev-worker1
+Created mapped LUN 0.
+/> /iscsi/iqn.2020-07.local.neclab:dev-storage-iscsi/tpg1/acls create iqn.2020-07.local.neclab:dev-worker2
+Created Node ACL for iqn.2020-07.local.neclab:dev-worker2
+Created mapped LUN 0.
+/> /iscsi/iqn.2020-07.local.neclab:dev-storage-iscsi/tpg1/acls create iqn.2020-07.local.neclab:dev-worker3
+Created Node ACL for iqn.2020-07.local.neclab:dev-worker3
+Created mapped LUN 0.
+
+/> /iscsi/iqn.2020-07.local.neclab:dev-storage-iscsi/tpg1/ set parameter AuthMethod=None
+Parameter AuthMethod is now 'None'.
+/> /iscsi/iqn.2020-07.local.neclab:dev-storage-iscsi/tpg1/ set attribute authentication=0
+Parameter authentication is now '0'.
+
+/> ls
+o- / ......................................................................................................................... [...]
+  o- backstores .............................................................................................................. [...]
+  | o- block .................................................................................................. [Storage Objects: 1]
+  | | o- storage1 ............................................................. [/dev/vg-targetd/lv01 (1.0GiB) write-thru activated]
+  | |   o- alua ................................................................................................... [ALUA Groups: 1]
+  | |     o- default_tg_pt_gp ....................................................................... [ALUA state: Active/optimized]
+  | o- fileio ................................................................................................. [Storage Objects: 0]
+  | o- pscsi .................................................................................................. [Storage Objects: 0]
+  | o- ramdisk ................................................................................................ [Storage Objects: 0]
+  o- iscsi ............................................................................................................ [Targets: 1]
+  | o- iqn.2020-07.local.neclab:dev-storage-iscsi ........................................................................ [TPGs: 1]
+  |   o- tpg1 ............................................................................................... [no-gen-acls, no-auth]
+  |     o- acls .......................................................................................................... [ACLs: 3]
+  |     | o- iqn.2020-07.local.neclab:dev-worker1 ................................................................. [Mapped LUNs: 1]
+  |     | | o- mapped_lun0 .............................................................................. [lun0 block/storage1 (rw)]
+  |     | o- iqn.2020-07.local.neclab:dev-worker2 ................................................................. [Mapped LUNs: 1]
+  |     | | o- mapped_lun0 .............................................................................. [lun0 block/storage1 (rw)]
+  |     | o- iqn.2020-07.local.neclab:dev-worker3 ................................................................. [Mapped LUNs: 1]
+  |     |   o- mapped_lun0 .............................................................................. [lun0 block/storage1 (rw)]
+  |     o- luns .......................................................................................................... [LUNs: 1]
+  |     | o- lun0 ....................................................... [block/storage1 (/dev/vg-targetd/lv01) (default_tg_pt_gp)]
+  |     o- portals .................................................................................................... [Portals: 1]
+  |       o- 0.0.0.0:3260 ..................................................................................................... [OK]
+  o- loopback ......................................................................................................... [Targets: 0]
+/>
+```
+
+### Настройка нод воркеров (Ubuntu)
+
+- Добавляем второй сетевой интерфейс для трафика хранилища на каждую воркер ноду
+
+Устанавливаем iscsi инициатор
+
+```console
+apt install -y open-iscsi
+
+Редактируем /etc/iscsi/initiatorname.iscsi
+
+```console
+InitiatorName=iqn.2020-07.local.neclab:dev-workerN
+```
+
+> где N - порядковый номер ноды
+
+Перезапускаем iscsid и open-iscsi
+
+```console
+systemctl restart iscsid open-iscsi
+systemctl enable iscsid open-iscsi
+```
+
+Проверяем подключение к iscsi хранилищу
+
+```console
+iscsiadm -m discovery -t sendtargets -p 192.2.1.21
+192.2.1.21:3260,1 iqn.2020-07.local.neclab:dev-storage-iscsi
+
+iscsiadm -m node --login
+Logging in to [iface: default, target: iqn.2020-07.local.neclab:dev-storage-iscsi, portal: 192.2.1.21,3260] (multiple)
+Login to [iface: default, target: iqn.2020-07.local.neclab:dev-storage-iscsi, portal: 192.2.1.21,3260] successful.
+
+iscsiadm -m node --logout
+Logging out of session [sid: 9, target: iqn.2020-07.local.neclab:dev-storage-iscsi, portal: 192.2.1.21,3260]
+Logout of [sid: 9, target: iqn.2020-07.local.neclab:dev-storage-iscsi, portal: 192.2.1.21,3260] successful.
+```
+
+Применяем манифесты создания pv, pvc и pod
+
+```console
+kubectl apply -f nginx-pv.yaml -f nginx-pvc.yaml -f nginx.yaml
+persistentvolume/iscsi-pv created
+persistentvolumeclaim/myclaim created
+pod/iscsi-pv-pod1 created
+```
+
+```console
+kubectl get pvc
+NAME      STATUS   VOLUME     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+myclaim   Bound    iscsi-pv   1Gi        RWO                           2s
+
+iscsi kubectl get pv
+NAME       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS   REASON   AGE
+iscsi-pv   1Gi        RWO            Retain           Bound    default/myclaim                           2m30s
+
+kubectl get pods -o wide
+NAME            READY   STATUS    RESTARTS   AGE   IP               NODE          NOMINATED NODE   READINESS GATES
+iscsi-pv-pod1   1/1     Running   0          21s   192.168.184.72   dev-worker2   <none>           <none>
+```
+
+Записываем данные в наш volume
+
+```console
+kubectl exec -it iscsi-pv-pod1 /bin/sh
+/ # ls -la /var/lib/busybox/
+total 24
+drwxr-xr-x    3 root     root          4096 Jul 26 12:33 .
+drwxr-xr-x    3 root     root          4096 Jul 26 12:33 ..
+drwx------    2 root     root         16384 Jul 26 12:33 lost+found
+/ # echo Hello! > /var/lib/busybox/text.txt
+/ # ls -la /var/lib/busybox/
+total 28
+drwxr-xr-x    3 root     root          4096 Jul 26 12:34 .
+drwxr-xr-x    3 root     root          4096 Jul 26 12:33 ..
+drwx------    2 root     root         16384 Jul 26 12:33 lost+found
+-rw-r--r--    1 root     root             7 Jul 26 12:34 text.txt
+```
+
+Идем на хранилище и создаем snapshot
+
+```console
+lvcreate -L 500MB -s -n sn01 /dev/vg-targetd/lv01
+  Rounding up size to full physical extent 12.00 MiB
+  Logical volume "sn01" created.
+```
+
+В volume пода удаляем данные
+
+```console
+kubectl exec -it iscsi-pv-pod1 /bin/sh
+/ # ls -la /var/lib/busybox/
+total 28
+drwxr-xr-x    3 root     root          4096 Jul 26 12:34 .
+drwxr-xr-x    3 root     root          4096 Jul 26 12:33 ..
+drwx------    2 root     root         16384 Jul 26 12:33 lost+found
+-rw-r--r--    1 root     root             7 Jul 26 12:34 text.txt
+/ # rm /var/lib/busybox/text.txt
+/ # ls -la /var/lib/busybox/
+total 24
+drwxr-xr-x    3 root     root          4096 Jul 26 12:36 .
+drwxr-xr-x    3 root     root          4096 Jul 26 12:33 ..
+drwx------    2 root     root         16384 Jul 26 12:33 lost+found
+```
+
+Удаляем наши pv, pvc, pod
+
+```console
+kubectl delete pod iscsi-pv-pod1
+pod "iscsi-pv-pod1" deleted
+
+kubectl delete pvc myclaim
+persistentvolumeclaim "myclaim" deleted
+
+iscsi kubectl delete pv iscsi-pv
+persistentvolume "iscsi-pv" deleted
+
+kubectl get pv
+No resources found in default namespace.
+
+iscsi kubectl get pvc
+No resources found in default namespace.
+```
+
+На хранилище останавливаем сервис target (в противном случаем snapshot не смержить)
+
+```console
+systemctl stop target
+
+lvconvert --merge /dev/vg-targetd/sn01
+  Merging of volume vg-targetd/sn01 started.
+  vg-targetd/lv01: Merged: 100.00%
+```
+
+Снова стартуем сервис
+
+```console
+systemctl start target
+```
+
+Снова применяем манифесты
+
+```console
+kubectl apply -f nginx-pv.yaml -f nginx-pvc.yaml -f nginx.yaml
+persistentvolume/iscsi-pv created
+persistentvolumeclaim/myclaim created
+pod/iscsi-pv-pod1 created
+
+kubectl get pv,pvc,pod
+NAME                        CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS   REASON   AGE
+persistentvolume/iscsi-pv   1Gi        RWO            Retain           Bound    default/myclaim                           98s
+
+NAME                            STATUS   VOLUME     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+persistentvolumeclaim/myclaim   Bound    iscsi-pv   1Gi        RWO                           98s
+
+NAME                READY   STATUS    RESTARTS   AGE
+pod/iscsi-pv-pod1   1/1     Running   0          97s
+```
+
+Проверяем, что данные из snapshot успешно востановились
+
+```console
+kubectl exec -it iscsi-pv-pod1 /bin/sh
+/ # ls -la /var/lib/busybox/
+lost+found/  text.txt
+/ # ls -la /var/lib/busybox/text.txt
+-rw-r--r--    1 root     root             7 Jul 26 13:03 /var/lib/busybox/text.txt
+/ # cat /var/lib/busybox/text.txt
+Hello!
+```
+
+### Теперь о динамическом провижинге
+
+Полезные ссылки:
+<https://github.com/kubernetes-incubator/external-storage/tree/master/iscsi/targetd>
+<https://ansilh.com/17-persistent_volumes/02-iscsi-provisioner/>
+
+#### На vm iscsi хранилища
+
+- volume group берем из предущего раздела
+- удаляем старые lv
+
+Настраиваем targetd
+
+/etc/target/targetd.yaml
+
+```yml
+user: admin
+password: password
+pool_name: vg-targetd
+ssl: false
+target_name: iqn.2020-07.local.neclab:dev-storage-iscsi
+```
+
+Перезапускаем сервис
+
+```console
+systemctl start targetd
+systemctl enable targetd
+systemctl status targetd
+
+● targetd.service - targetd storage array API daemon
+   Loaded: loaded (/usr/lib/systemd/system/targetd.service; enabled; vendor preset: disabled)
+   Active: active (running) since Sun 2020-07-26 16:44:21 MSK; 22h ago
+ Main PID: 4924 (targetd)
+   CGroup: /system.slice/targetd.service
+           └─4924 targetd
+
+Jul 26 16:44:21 dev-storage-iscsi systemd[1]: Started targetd storage array API daemon.
+Jul 26 16:44:27 dev-storage-iscsi targetd[4924]: INFO:root:started server (TLS no)
+```
+
+Создаем ns для провижинера
+
+```console
+kubectl create ns iscsi-provisioner
+namespace/iscsi-provisioner created
+```
+
+Создаем секрет для подключения к targetd
+
+```console
+kubectl create secret generic targetd-account --from-literal=username=admin --from-literal=password=password -n iscsi-provisioner
+```
+
+Применяем машифесты провижинера
+
+```console
+kubectl apply -f iscsi-provisioner-d.yaml -n iscsi-provisioner
+clusterrole.rbac.authorization.k8s.io/iscsi-provisioner-runner created
+clusterrolebinding.rbac.authorization.k8s.io/run-iscsi-provisioner created
+serviceaccount/iscsi-provisioner created
+deployment.apps/iscsi-provisioner created
+
+ kubectl get pods -n iscsi-provisioner
+NAME                                READY   STATUS    RESTARTS   AGE
+iscsi-provisioner-6b58bd885-wdqtw   1/1     Running   0          34s
+
+kubectl apply -f iscsi-provisioner-class.yaml -n iscsi-provisioner
+storageclass.storage.k8s.io/iscsi-targetd-vg-targetd created
+```
+
+Применяем манифесты нашего приложения
+
+```console
+kubectl apply -f nginx-pvc.yaml
+persistentvolumeclaim/myclaim created
+
+kubectl apply -f nginx.yaml
+pod/iscsi-pv-pod1 created
+```
+
+Проверяем, что pv и pvc в статусе bound
+
+```console
+kubectl get pv
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS               REASON   AGE
+pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb   100Mi      RWO            Delete           Bound    default/myclaim   iscsi-targetd-vg-targetd            25s
+
+kubectl get pvc
+NAME      STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS               AGE
+myclaim   Bound    pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb   100Mi      RWO            iscsi-targetd-vg-targetd   62s
+
+kubectl get pods -o wide
+NAME            READY   STATUS    RESTARTS   AGE   IP               NODE          NOMINATED NODE   READINESS GATES
+iscsi-pv-pod1   1/1     Running   0          40s   192.168.41.206   dev-worker1   <none>           <none>
+```
+
+Идем на vm iscsi хранилища и проверяем там
+
+```console
+lvs
+  LV                                       VG                       Attr       LSize   Pool Origin Data%  Meta%  Move Log Cpy%Sync Convert
+  pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb vg-targetd               -wi-ao---- 100.00m
 
 
-After reaching the UI the first time you can login with username: admin and the password will be the
-name of the server pod. You can get the pod name by running:
-
-kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-server -o name | cut -d'/' -f 2
-
-argocd-server-7877ff8889-plczn
-
-kubectl label ns microservices-demo istio-injection=enabled 
-namespace/microservices-demo labeled
+targetcli
+targetcli shell version 2.1.fb49
+Copyright 2011-2013 by Datera, Inc and others.
+For help on commands, type 'help'.
+/> ls
+o- / ......................................................................................................................... [...]
+  o- backstores .............................................................................................................. [...]
+  | o- block .................................................................................................. [Storage Objects: 1]
+  | | o- vg-targetd:pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb  [/dev/vg-targetd/pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb (100.0MiB) write-thru activated]
+  | |   o- alua ................................................................................................... [ALUA Groups: 1]
+  | |     o- default_tg_pt_gp ....................................................................... [ALUA state: Active/optimized]
+  | o- fileio ................................................................................................. [Storage Objects: 0]
+  | o- pscsi .................................................................................................. [Storage Objects: 0]
+  | o- ramdisk ................................................................................................ [Storage Objects: 0]
+  o- iscsi ............................................................................................................ [Targets: 1]
+  | o- iqn.2020-07.local.neclab:dev-storage-iscsi ........................................................................ [TPGs: 1]
+  |   o- tpg1 ............................................................................................... [no-gen-acls, no-auth]
+  |     o- acls .......................................................................................................... [ACLs: 3]
+  |     | o- iqn.2020-07.local.neclab:dev-worker1 ................................................................. [Mapped LUNs: 1]
+  |     | | o- mapped_lun0 ................................... [lun0 block/vg-targetd:pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb (rw)]
+  |     | o- iqn.2020-07.local.neclab:dev-worker2 ................................................................. [Mapped LUNs: 1]
+  |     | | o- mapped_lun0 ................................... [lun0 block/vg-targetd:pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb (rw)]
+  |     | o- iqn.2020-07.local.neclab:dev-worker3 ................................................................. [Mapped LUNs: 1]
+  |     |   o- mapped_lun0 ................................... [lun0 block/vg-targetd:pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb (rw)]
+  |     o- luns .......................................................................................................... [LUNs: 1]
+  |     | o- lun0  [block/vg-targetd:pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb (/dev/vg-targetd/pvc-24701fd6-70b3-40b3-9cf4-e2e1f5936cfb) (default_tg_pt_gp)]
+  |     o- portals .................................................................................................... [Portals: 1]
+  |       o- 0.0.0.0:3260 ..................................................................................................... [OK]
+  o- loopback ......................................................................................................... [Targets: 0]
+/>
+```
 
 ## GitOps и инструменты поставки
 
@@ -1179,6 +1626,46 @@ Jaeger можно установить с помощью istio оператор�
   - <название> - для тресов непосредственно из микросервисов
 
 ![Jaeger](kubernetes-gitops/jaeger.png)
+
+### ArgoCD
+
+<https://hub.helm.sh/charts/argo/argo-cd>
+
+```console
+helm repo add argo https://argoproj.github.io/argo-helm
+
+helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace
+Release "argocd" does not exist. Installing it now.
+manifest_sorter.go:192: info: skipping unknown hook: "crd-install"
+manifest_sorter.go:192: info: skipping unknown hook: "crd-install"
+NAME: argocd
+LAST DEPLOYED: Wed Jul  1 15:53:14 2020
+NAMESPACE: argocd
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+In order to access the server UI you have the following options:
+
+1. kubectl port-forward service/argocd-server -n argocd 8080:443
+
+    and then open the browser on http://localhost:8080 and accept the certificate
+
+2. enable ingress in the values file `service.ingress.enabled` and either
+      - Add the annotation for ssl passthrough: https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/ingress.md#option-1-ssl-passthrough
+      - Add the `--insecure` flag to `server.extraArgs` in the values file and terminate SSL at your ingress: https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/ingress.md#option-2-multiple-ingress-objects-and-hosts
+
+
+After reaching the UI the first time you can login with username: admin and the password will be the
+name of the server pod. You can get the pod name by running:
+
+kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-server -o name | cut -d'/' -f 2
+```
+
+```console
+kubectl label ns microservices-demo istio-injection=enabled
+namespace/microservices-demo labeled
+```
 
 ## Hashicorp Vault + K8s
 
