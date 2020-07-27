@@ -1,7 +1,7 @@
 kind: Pod
 apiVersion: v1
 metadata:
-  name: my-csi-app
+  name: storage-pod
 spec:
   containers:
     - name: my-frontend
@@ -13,4 +13,4 @@ spec:
   volumes:
     - name: my-csi-volume
       persistentVolumeClaim:
-        claimName: csi-pvc # defined in csi-pvc.yaml
+        claimName: storage-pvc # defined in csi-pvc.yaml
