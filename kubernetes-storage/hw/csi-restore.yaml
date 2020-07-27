@@ -17,7 +17,7 @@ spec:
 kind: Pod
 apiVersion: v1
 metadata:
-  name: my-csi-app
+  name: my-csi-app-snap
 spec:
   containers:
     - name: my-frontend
