@@ -14,7 +14,7 @@
 kind create cluster --config ./cluster/cluster.yaml
 ```
 
-Клонируем репозитарий
+Клонируем репозиторий
 
 ```console
 git clone git@github.com:kubernetes-csi/csi-driver-host-path.git
