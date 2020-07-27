@@ -5,8 +5,8 @@
 ### Развертывание k8s-кластер, к которому добавляется хранилище на iSCSI и проверка работы snapshots | Задание со ⭐
 
 Полезные ссылки:  
-<https://github.com/kubernetes/examples/tree/master/volumes/iscsi>
-<https://www.saqwel.ru/articles/linux/nastrojka-linux-iscsi-posredstvom-targetcli/>
+<https://github.com/kubernetes/examples/tree/master/volumes/iscsi>  
+<https://www.saqwel.ru/articles/linux/nastrojka-linux-iscsi-posredstvom-targetcli/>  
 <https://kifarunix.com/how-to-install-and-configure-iscsi-storage-server-on-ubuntu-18-04/>
 
 #### Настройка vm хранилища (centos)
@@ -348,7 +348,7 @@ Hello!
 ### Теперь о динамическом провижинге
 
 Полезные ссылки:  
-<https://github.com/kubernetes-incubator/external-storage/tree/master/iscsi/targetd>
+<https://github.com/kubernetes-incubator/external-storage/tree/master/iscsi/targetd>  
 <https://ansilh.com/17-persistent_volumes/02-iscsi-provisioner/>
 
 #### На vm iscsi хранилища
