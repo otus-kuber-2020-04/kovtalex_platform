@@ -2,6 +2,398 @@
 
 ## CSI
 
+### CSI Hostpath Driver
+
+<https://github.com/kubernetes-csi/csi-driver-host-path/blob/master/docs/deploy-1.17-and-later.md>
+
+#### Развертывание
+
+Разворачиваем кластер
+
+```console
+kind create cluster --config ./cluster/cluster.yaml
+```
+
+Клонируем репозитарий
+
+```console
+git clone git@github.com:kubernetes-csi/csi-driver-host-path.git
+```
+
+Применяем CRD
+
+```console
+# Change to the latest supported snapshotter version
+export SNAPSHOTTER_VERSION=v2.0.1
+
+# Apply VolumeSnapshot CRDs
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/$SNAPSHOTTER_VERSION/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/$SNAPSHOTTER_VERSION/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/$SNAPSHOTTER_VERSION/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+
+# Create snapshot controller
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/$SNAPSHOTTER_VERSION/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/$SNAPSHOTTER_VERSION/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml
+```
+
+Устанавливаем драйвер
+
+```console
+./csi-driver-host-path/deploy/kubernetes-1.18/deploy.sh
+```
+
+Проверяем поды
+
+```console
+kubectl get pods
+
+NAME                         READY   STATUS    RESTARTS   AGE
+csi-hostpath-attacher-0      1/1     Running   0          106s
+csi-hostpath-provisioner-0   1/1     Running   0          105s
+csi-hostpath-resizer-0       1/1     Running   0          104s
+csi-hostpath-snapshotter-0   1/1     Running   0          103s
+csi-hostpath-socat-0         1/1     Running   0          103s
+csi-hostpathplugin-0         3/3     Running   0          105s
+snapshot-controller-0        1/1     Running   0          5m48s
+```
+
+Проверяем storageclass
+
+```console
+kubectl get sc
+NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+standard (default)   rancher.io/local-path   Delete          WaitForFirstConsumer   false                  12m
+```
+
+#### Запуск приложения
+
+Применяем манифесты sc, pvc, app
+
+```console
+for i in ./hw/csi-storageclass.yaml ./hw/csi-pvc.yaml ./hw/csi-app.yaml; do kubectl apply -f $i; done
+storageclass.storage.k8s.io/csi-hostpath-sc created
+persistentvolumeclaim/csi-pvc created
+pod/my-csi-app created
+```
+
+```console
+kubectl get pv
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS      REASON   AGE
+pvc-220ed5b5-ebd4-4a64-bb9a-c1fa567d47b7   1Gi        RWO            Delete           Bound    default/csi-pvc   csi-hostpath-sc            7s
+```
+
+```console
+kubectl get pvc
+NAME      STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      AGE
+csi-pvc   Bound    pvc-220ed5b5-ebd4-4a64-bb9a-c1fa567d47b7   1Gi        RWO            csi-hostpath-sc   28s
+```
+
+Инспектируем под
+
+```console
+kubectl describe pods/my-csi-app
+Name:         my-csi-app
+Namespace:    default
+Priority:     0
+Node:         kind-worker/172.18.0.2
+Start Time:   Tue, 28 Jul 2020 00:46:36 +0300
+Labels:       <none>
+Annotations:  kubectl.kubernetes.io/last-applied-configuration:
+                {"apiVersion":"v1","kind":"Pod","metadata":{"annotations":{},"name":"my-csi-app","namespace":"default"},"spec":{"containers":[{"command":[...
+Status:       Running
+IP:           10.244.1.9
+IPs:
+  IP:  10.244.1.9
+Containers:
+  my-frontend:
+    Container ID:  containerd://487ab4754a47e7f467cb6e27e2c47604881ae02c12e472f084f2e7285c6d5bbd
+    Image:         busybox
+    Image ID:      docker.io/library/busybox@sha256:9ddee63a712cea977267342e8750ecbc60d3aab25f04ceacfa795e6fce341793
+    Port:          <none>
+    Host Port:     <none>
+    Command:
+      sleep
+      1000000
+    State:          Running
+      Started:      Tue, 28 Jul 2020 00:46:45 +0300
+    Ready:          True
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /data from my-csi-volume (rw)
+      /var/run/secrets/kubernetes.io/serviceaccount from default-token-p2sd2 (ro)
+Conditions:
+  Type              Status
+  Initialized       True
+  Ready             True
+  ContainersReady   True
+  PodScheduled      True
+Volumes:
+  my-csi-volume:
+    Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+    ClaimName:  csi-pvc
+    ReadOnly:   false
+  default-token-p2sd2:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  default-token-p2sd2
+    Optional:    false
+QoS Class:       BestEffort
+Node-Selectors:  <none>
+Tolerations:     node.kubernetes.io/not-ready:NoExecute for 300s
+                 node.kubernetes.io/unreachable:NoExecute for 300s
+Events:
+  Type    Reason                  Age   From                     Message
+  ----    ------                  ----  ----                     -------
+  Normal  Scheduled               44s   default-scheduler        Successfully assigned default/my-csi-app to kind-worker
+  Normal  SuccessfulAttachVolume  44s   attachdetach-controller  AttachVolume.Attach succeeded for volume "pvc-220ed5b5-ebd4-4a64-bb9a-c1fa567d47b7"
+  Normal  Pulling                 40s   kubelet, kind-worker     Pulling image "busybox"
+  Normal  Pulled                  35s   kubelet, kind-worker     Successfully pulled image "busybox"
+  Normal  Created                 35s   kubelet, kind-worker     Created container my-frontend
+  Normal  Started                 35s   kubelet, kind-worker     Started container my-frontend
+```
+
+Нас интересует следующая информация
+
+```consold
+Mounts:
+  /data from my-csi-volume (rw)
+
+Volumes:
+  my-csi-volume:
+    Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+    ClaimName:  csi-pvc
+    ReadOnly:   false
+
+Events:
+  Type    Reason                  Age   From                     Message
+  ----    ------                  ----  ----                     -------
+  Normal  SuccessfulAttachVolume  44s   attachdetach-controller  AttachVolume.Attach succeeded for volume "pvc-220ed5b5-ebd4-4a64-bb9a-c1fa567d47b7"
+```
+
+Подтверждение создания объекта VolumeAttachment
+
+```console
+kubectl describe volumeattachment
+Name:         csi-eb85c21cc2107b883d10fdb1bf15fce62d06166aa889b7528588c1e41e8d3942
+Namespace:
+Labels:       <none>
+Annotations:  <none>
+API Version:  storage.k8s.io/v1
+Kind:         VolumeAttachment
+Metadata:
+  Creation Timestamp:  2020-07-27T21:46:36Z
+  Managed Fields:
+    API Version:  storage.k8s.io/v1
+    Fields Type:  FieldsV1
+    fieldsV1:
+      f:status:
+        f:attached:
+    Manager:      csi-attacher
+    Operation:    Update
+    Time:         2020-07-27T21:46:36Z
+    API Version:  storage.k8s.io/v1
+    Fields Type:  FieldsV1
+    fieldsV1:
+      f:spec:
+        f:attacher:
+        f:nodeName:
+        f:source:
+          f:persistentVolumeName:
+    Manager:         kube-controller-manager
+    Operation:       Update
+    Time:            2020-07-27T21:46:36Z
+  Resource Version:  1189
+  Self Link:         /apis/storage.k8s.io/v1/volumeattachments/csi-eb85c21cc2107b883d10fdb1bf15fce62d06166aa889b7528588c1e41e8d3942
+  UID:               f9858161-7497-4200-a5ed-0a736d029a52
+Spec:
+  Attacher:   hostpath.csi.k8s.io
+  Node Name:  kind-worker
+  Source:
+    Persistent Volume Name:  pvc-220ed5b5-ebd4-4a64-bb9a-c1fa567d47b7
+Status:
+  Attached:  true
+Events:      <none>
+```
+
+#### Snaphot
+
+Запишем данные в volume
+
+```console
+kubectl exec -it my-csi-app /bin/sh
+/ # touch /data/hello-world
+/ # ls -la /data
+total 8
+drwxr-xr-x    2 root     root          4096 Jul 27 21:24 .
+drwxr-xr-x    1 root     root          4096 Jul 27 21:15 ..
+-rw-r--r--    1 root     root             0 Jul 27 21:24 hello-world
+```
+
+Создадим snapshot
+
+```console
+kubectl apply -f hw/csi-snapshot-v1beta1.yaml
+volumesnapshot.snapshot.storage.k8s.io/new-snapshot-demo created
+```
+
+Убедимся, что snapshot создался
+
+```console
+kubectl get volumesnapshot
+NAME                AGE
+new-snapshot-demo   94s
+```
+
+```console
+kubectl describe volumesnapshot
+Name:         new-snapshot-demo
+Namespace:    default
+Labels:       <none>
+Annotations:  kubectl.kubernetes.io/last-applied-configuration:
+                {"apiVersion":"snapshot.storage.k8s.io/v1beta1","kind":"VolumeSnapshot","metadata":{"annotations":{},"name":"new-snapshot-demo","namespace...
+API Version:  snapshot.storage.k8s.io/v1beta1
+Kind:         VolumeSnapshot
+Metadata:
+  Creation Timestamp:  2020-07-27T21:49:13Z
+  Finalizers:
+    snapshot.storage.kubernetes.io/volumesnapshot-as-source-protection
+    snapshot.storage.kubernetes.io/volumesnapshot-bound-protection
+  Generation:  1
+  Managed Fields:
+    API Version:  snapshot.storage.k8s.io/v1beta1
+    Fields Type:  FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:finalizers:
+          v:"snapshot.storage.kubernetes.io/volumesnapshot-bound-protection":
+    Manager:         snapshot-controller
+    Operation:       Update
+    Time:            2020-07-27T21:49:13Z
+  Resource Version:  1642
+  Self Link:         /apis/snapshot.storage.k8s.io/v1beta1/namespaces/default/volumesnapshots/new-snapshot-demo
+  UID:               41b224d8-9699-43bf-88f5-c65204b0f99a
+Spec:
+  Source:
+    Persistent Volume Claim Name:  csi-pvc
+  Volume Snapshot Class Name:      csi-hostpath-snapclass
+Status:
+  Bound Volume Snapshot Content Name:  snapcontent-41b224d8-9699-43bf-88f5-c65204b0f99a
+  Ready To Use:                        false
+Events:                                <none>
+```
+
+```console
+kubectl get volumesnapshotcontent
+NAME                                               AGE
+snapcontent-41b224d8-9699-43bf-88f5-c65204b0f99a   64s
+```
+
+```console
+kubectl describe volumesnapshotcontents
+Name:         snapcontent-41b224d8-9699-43bf-88f5-c65204b0f99a
+Namespace:
+Labels:       <none>
+Annotations:  <none>
+API Version:  snapshot.storage.k8s.io/v1beta1
+Kind:         VolumeSnapshotContent
+Metadata:
+  Creation Timestamp:  2020-07-27T21:49:13Z
+  Finalizers:
+    snapshot.storage.kubernetes.io/volumesnapshotcontent-bound-protection
+  Generation:  1
+  Managed Fields:
+    API Version:  snapshot.storage.k8s.io/v1beta1
+    Fields Type:  FieldsV1
+    fieldsV1:
+      f:metadata:
+        f:finalizers:
+          .:
+          v:"snapshot.storage.kubernetes.io/volumesnapshotcontent-bound-protection":
+    Manager:      snapshot-controller
+    Operation:    Update
+    Time:         2020-07-27T21:49:13Z
+    API Version:  snapshot.storage.k8s.io/v1beta1
+    Fields Type:  FieldsV1
+    fieldsV1:
+      f:status:
+        .:
+        f:creationTime:
+        f:readyToUse:
+        f:restoreSize:
+        f:snapshotHandle:
+    Manager:         csi-snapshotter
+    Operation:       Update
+    Time:            2020-07-27T21:50:00Z
+  Resource Version:  1777
+  Self Link:         /apis/snapshot.storage.k8s.io/v1beta1/volumesnapshotcontents/snapcontent-41b224d8-9699-43bf-88f5-c65204b0f99a
+  UID:               b120abb0-0470-4550-a900-dc1ac88405db
+Spec:
+  Deletion Policy:  Delete
+  Driver:           hostpath.csi.k8s.io
+  Source:
+    Volume Handle:             a4fc4a93-d052-11ea-8b8f-c22405f4a253
+  Volume Snapshot Class Name:  csi-hostpath-snapclass
+  Volume Snapshot Ref:
+    API Version:       snapshot.storage.k8s.io/v1beta1
+    Kind:              VolumeSnapshot
+    Name:              new-snapshot-demo
+    Namespace:         default
+    Resource Version:  1636
+    UID:               41b224d8-9699-43bf-88f5-c65204b0f99a
+Status:
+  Creation Time:    1595886600444714000
+  Ready To Use:     true
+  Restore Size:     1073741824
+  Snapshot Handle:  1eb7cf15-d053-11ea-8b8f-c22405f4a253
+Events:             <none>
+```
+
+Удалим pod, pvc и pv
+
+```console
+kubectl delete -f ./hw/csi-app.yaml
+pod "my-csi-app" deleted
+kubectl delete -f ./hw/csi-pvc.yaml
+persistentvolumeclaim "csi-pvc" deleted
+
+kubectl get pvc
+No resources found in default namespace.
+kubectl get pv
+No resources found in default namespace.
+```
+
+Восстанавливаемся из snapshot
+
+```console
+kubectl apply -f ./hw/csi-restore.yaml
+persistentvolumeclaim/hpvc-restore created
+```
+
+Применяем манифест пода
+
+```console
+kubectl apply -f ./hw/csi-app.yaml
+persistentvolumeclaim/hpvc-restore created
+
+kubectl get pv
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS      REASON   AGE
+pvc-25dc08a9-8f0e-4748-92df-0dd39526cba7   1Gi        RWO            Delete           Bound    default/csi-pvc   csi-hostpath-sc            4s
+kubectl get pvc
+NAME      STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      AGE
+csi-pvc   Bound    pvc-25dc08a9-8f0e-4748-92df-0dd39526cba7   1Gi        RWO            csi-hostpath-sc   5s
+```
+
+Проверяем, что данные на месте
+
+```console
+kubectl exec my-csi-app -- ls -la /data
+
+total 8
+drwxr-xr-x    2 root     root          4096 Jul 27 22:00 .
+drwxr-xr-x    1 root     root          4096 Jul 27 22:00 ..
+-rw-r--r--    1 root     root             0 Jul 27 21:48 hello-world
+```
+
 ### Развертывание k8s-кластер, к которому добавляется хранилище на iSCSI и проверка работы snapshots | Задание со ⭐
 
 Полезные ссылки:  
