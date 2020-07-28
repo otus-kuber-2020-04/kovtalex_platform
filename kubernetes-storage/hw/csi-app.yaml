@@ -1,0 +1,15 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: storage-pod
+spec:
+  containers:
+    - name: my-frontend
+      image: nginx
+      volumeMounts:
+      - mountPath: "/data"
+        name: my-csi-volume
+  volumes:
+    - name: my-csi-volume
+      persistentVolumeClaim:
+        claimName: storage-pvc # defined in csi-pvc.yaml

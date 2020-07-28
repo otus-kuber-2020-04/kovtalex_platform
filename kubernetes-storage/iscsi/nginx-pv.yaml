@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: iscsi-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  iscsi:
+     targetPortal: 192.2.1.21
+     iqn: iqn.2020-07.local.neclab:dev-storage-iscsi
+     lun: 0
+     fsType: 'ext4'
+     readOnly: false
