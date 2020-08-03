@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netperf-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: netperf-operator
+  template:
+    metadata:
+      labels:
+        name: netperf-operator
+    spec:
+      containers:
+        - name: netperf-operator
+          image: tailoredcloud/netperf-operator:v0.1.1-742a3e1
+          command:
+          - netperf-operator
+          imagePullPolicy: Always
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
