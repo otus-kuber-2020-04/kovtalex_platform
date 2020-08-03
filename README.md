@@ -1,251 +1,355 @@
 # kovtalex_platform
 
-## Отладка и тестирование в Kubernetes
+## Подходы к разверты развертыванию
 
-### kubectl debug
+### Запуск кластера версии 1.17 через kubeadm и его обновление
 
-Устанавливам в наш кластер kubectl debug
+Нам потребуются в GCP 4 ноды с образом Ubuntu 18.04 LTS
+
+- master - 1 экземпляр (n1-standard-2)
+- worker - 3 экземпляра (n1-standard-1)
+
+На каждой машине
+
+- Отключаем swap
 
 ```console
-brew install aylei/tap/kubectl-debug
+sudo -i
+swapoff -a
 ```
 
-И применяем манифест агента
+- Включаем маршрутизацию
 
 ```console
-kubectl apply -f strace/agent_daemonset.yml
-daemonset.apps/debug-agent created
+cat > /etc/sysctl.d/99-kubernetes-cri.conf <<EOF
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+sysctl --system
 ```
 
-Запускаем pod с приложением
+- Устанавливаем Docker
 
 ```console
-kubectl apply -f strace/nginx.yaml
-pod/nginx created
-```
-
-Запускаем debug
-
-```console
-kubectl-debug nginx --agentless=false --port-forward=true
-
-bash-5.0# strace -p 1
-strace: attach: ptrace(PTRACE_SEIZE, 1): Operation not permitted
-```
-
-Видим, что не хватает capability, которые есть в версии v0.1.1.  
-Меняем image tag и применяем манифест
-
-```console
-kubectl apply -f strace/agent_daemonset.yml
-daemonset.apps/debug-agent configured
-```
-
-Проверяем, что все в порядке
-
-```console
-kubectl-debug nginx --agentless=false --port-forward=true
-bash-5.0# strace -c -p1
-strace: Process 1 attached
-```
-
-### iptables-tailer
-
-Один из полезных инструментов - это [kube-iptables-tailer](https://github.com/box/kube-iptables-tailer).  
-Он предназначен для того, чтобы выводить информацию об отброшенных iptables пакетах в журнал событий Kubernetes (kubectl get events).  
-Основной кейс - сообщить разработчикам сервисов о проблемах с NetworkPolicy.
-
-Установим [netperf-operator](https://github.com/piontec/netperf-operator)
-
-- Это Kubernetes-оператор, который позволяет запускать тесты пропускной способности сети между нодами кластера
-- Сам проект - не очень production-grade, но иногда выручает
-
-```console
-kubectl apply -f https://raw.githubusercontent.com/piontec/netperf-operator/master/deploy/crd.yaml
-kubectl apply -f https://raw.githubusercontent.com/piontec/netperf-operator/master/deploy/rbac.yaml
-kubectl apply -f https://raw.githubusercontent.com/piontec/netperf-operator/master/deploy/operator.yaml
-kubectl apply -f https://raw.githubusercontent.com/piontec/netperf-operator/master/deploy/cr.yaml
-```
-
-Проверяем
-
-```console
-kubectl describe netperf.app.example.com/example
-Name:         example
-Namespace:    default
-Labels:       <none>
-Annotations:  kubectl.kubernetes.io/last-applied-configuration:
-                {"apiVersion":"app.example.com/v1alpha1","kind":"Netperf","metadata":{"annotations":{},"name":"example","namespace":"default"}}
-API Version:  app.example.com/v1alpha1
-Kind:         Netperf
-Metadata:
-  Creation Timestamp:  2020-07-31T14:39:27Z
-  Generation:          4
-  Resource Version:    1162239
-  Self Link:           /apis/app.example.com/v1alpha1/namespaces/default/netperfs/example
-  UID:                 983574f7-60db-4ccb-8a09-d0f7c738dd20
-Spec:
-  Client Node:  
-  Server Node:  
-Status:
-  Client Pod:          netperf-client-d0f7c738dd20
-  Server Pod:          netperf-server-d0f7c738dd20
-  Speed Bits Per Sec:  12478.8
-  Status:              Done
-Events:                <none>
-```
-
-> Видим статус **Done** и скорость: 12478 bps
-
-Добавим сетевую политику для Calicoo, чтобы ограничить доступ к подам Netperf и включить логирование в iptables
-
-```console
-kubectl apply -f kit/netperf-calico-policy.yaml
-```
-
-Перезапустим тест удалив cr и создав вновь
-
-```console
-kubectl delete -f kit/deploy/cr.yaml
-netperf.app.example.com "example" deleted
-
-kubectl apply -f kit/deploy/cr.yaml
-netperf.app.example.com/example created
-```
-
-Проверим:
-
-```console
-kubectl describe netperf.app.example.com/example
-Name:         example
-Namespace:    default
-Labels:       <none>
-Annotations:  kubectl.kubernetes.io/last-applied-configuration:
-                {"apiVersion":"app.example.com/v1alpha1","kind":"Netperf","metadata":{"annotations":{},"name":"example","namespace":"default"}}
-API Version:  app.example.com/v1alpha1
-Kind:         Netperf
-Metadata:
-  Creation Timestamp:  2020-07-31T14:47:20Z
-  Generation:          3
-  Resource Version:    1164540
-  Self Link:           /apis/app.example.com/v1alpha1/namespaces/default/netperfs/example
-  UID:                 704fc8e5-7f7f-4035-aa2d-60cdcba88958
-Spec:
-  Client Node:  
-  Server Node:  
-Status:
-  Client Pod:          netperf-client-60cdcba88958
-  Server Pod:          netperf-server-60cdcba88958
-  Speed Bits Per Sec:  0
-  Status:              Started test
-Events:                <none>
-```
-
-> Видим, что тест висит в состоянии Starting. В нашей сетевой политике есть ошибка.
-
-Проверим, что в логах ноды Kubernetes появились сообщения об отброшенных пакетах
-
-```console
-kubectl get pod -o wide
-NAME                                READY   STATUS    RESTARTS   AGE     IP           NODE                                       NOMINATED NODE   READINESS GATES
-netperf-client-60cdcba88958         1/1     Running   0          108s    10.32.0.15   gke-cluster-1-default-pool-02a8e156-dr3f   <none>           <none>
-netperf-operator-85569b59dd-hgvnn   1/1     Running   0          9m44s   10.32.2.6    gke-cluster-1-default-pool-3d470404-lm1s   <none>           <none>
-netperf-server-60cdcba88958         1/1     Running   0          110s    10.32.0.14   gke-cluster-1-default-pool-02a8e156-dr3f   <none>           <none>
-```
-
-Подключимся к ноде по ssh
-
-```console
-gcloud compute ssh gke-cluster-1-default-pool-02a8e156-dr3f
+apt-get update && apt-get install -y \
+apt-transport-https ca-certificates curl software-properties-common gnupg2
 ```
 
 ```console
-iptables --list -nv | grep DROP
-   19  1140 DROP       all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* cali:He8TRqGPuUw3VGwk */
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+add-apt-repository \
+"deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+$(lsb_release -cs) \
+stable"
 ```
-
-> счетчики дропов ненулевые
 
 ```console
-iptables --list -nv | grep LOG
-   21  1260 LOG        all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* cali:B30DykF1ntLW86eD */ LOG flags 0 level 5 prefix "calico-packet: "
+apt-get update && apt-get install -y \
+containerd.io=1.2.13-1 \
+docker-ce=5:19.03.8~3-0~ubuntu-$(lsb_release -cs) \
+docker-ce-cli=5:19.03.8~3-0~ubuntu-$(lsb_release -cs)
 ```
-
-> счетчики с действием логирования ненулевые
 
 ```console
-journalctl -k | grep calico
-Jul 31 14:52:04 gke-cluster-1-default-pool-02a8e156-dr3f kernel: calico-packet: IN=cali34a48ed36b3 OUT=cali2ff164dea95 MAC=ee:ee:ee:ee:ee:ee:76:35:a4:01:96:bd:08:00 SRC=10.32.0.15 DST=10.32.0.14 LEN=60 TOS=0x00 PREC=0x00 TTL=63 ID=16881 DF PROTO=TCP SPT=48029 DPT=12865 WINDOW=42600 RES=0x00 SYN URGP=0
-Jul 31 14:52:12 gke-cluster-1-default-pool-02a8e156-dr3f kernel: calico-packet: IN=cali34a48ed36b3 OUT=cali2ff164dea95 MAC=ee:ee:ee:ee:ee:ee:76:35:a4:01:96:bd:08:00 SRC=10.32.0.15 DST=10.32.0.14 LEN=60 TOS=0x00 PREC=0x00 TTL=63 ID=16882 DF PROTO=TCP SPT=48029 DPT=12865 WINDOW=42600 RES=0x00 SYN URGP=0
-Jul 31 14:52:28 gke-cluster-1-default-pool-02a8e156-dr3f kernel: calico-packet: IN=cali34a48ed36b3 OUT=cali2ff164dea95 MAC=ee:ee:ee:ee:ee:ee:76:35:a4:01:96:bd:08:00 SRC=10.32.0.15 DST=10.32.0.14 LEN=60 TOS=0x00 PREC=0x00 TTL=63 ID=16883 DF PROTO=TCP SPT=48029 DPT=12865 WINDOW=42600 RES=0x00 SYN URGP=0
-Jul 31 14:53:01 gke-cluster-1-default-pool-02a8e156-dr3f kernel: calico-packet: IN=cali34a48ed36b3 OUT=cali2ff164dea95 MAC=ee:ee:ee:ee:ee:ee:76:35:a4:01:96:bd:08:00 SRC=10.32.0.15 DST=10.32.0.14 LEN=60 TOS=0x00 PREC=0x00 TTL=63 ID=16884 DF PROTO=TCP SPT=48029 DPT=12865 WINDOW=42600 RES=0x00 SYN URGP=0
+# Setup daemon.
+cat > /etc/docker/daemon.json <<EOF
+{
+"exec-opts": ["native.cgroupdriver=systemd"],
+"log-driver": "json-file",
+"log-opts": {
+"max-size": "100m"
+},
+"storage-driver": "overlay2"
+}
+EOF
+mkdir -p /etc/systemd/system/docker.service.d
+# Restart docker.
+systemctl daemon-reload
+systemctl restart docker
 ```
 
-Установим iptables-tailer
+- Устанавливаем kubeadm, kubelet and kubectl
 
-Поправим манифест iptables-tailer.yaml
+```console
+apt-get update && apt-get install -y apt-transport-https curl
+
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+cat <<EOF > /etc/apt/sources.list.d/kubernetes.list
+deb https://apt.kubernetes.io/ kubernetes-xenial main
+EOF
+apt-get update
+apt-get install -y kubelet=1.17.4-00 kubeadm=1.17.4-00 kubectl=1.17.4-00
+```
+
+- Создаем кластер
+
+```console
+kubeadm init --pod-network-cidr=192.168.0.0/24
+```
+
+В выводе будут:
+
+- команда для копирования конфига kubectl
+- сообщение о том, что необходимо установить сетевой плагин
+- команда для присоединения worker ноды
+
+```console
+Your Kubernetes control-plane has initialized successfully!
+To start using your cluster, you need to run the following as a regular user:
+  mkdir -p $HOME/.kube
+  sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+  sudo chown $(id -u):$(id -g) $HOME/.kube/config
+You should now deploy a pod network to the cluster.
+Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
+  https://kubernetes.io/docs/concepts/cluster-administration/addons/
+Then you can join any number of worker nodes by running the following on each as root:
+kubeadm join 10.132.0.52:6443 --token u8gxos.mf3ok30ad4xlgqj4 \
+    --discovery-token-ca-cert-hash sha256:939bb3eb4be6e159e824b7f0b698a4e53e1b6ee59a7190d462cbc332a1731fec
+```
+
+- Копируем конфиг kubectl
+
+```console
+mkdir -p $HOME/.kube
+cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+- Устанавливаем сетевой плагин ([Документация](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/#pod-network))
+
+```console
+kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+```
+
+- Присоединяем остальные ноды
+
+```console
+kubeadm join 10.132.0.52:6443 --token u8gxos.mf3ok30ad4xlgqj4 \
+    --discovery-token-ca-cert-hash sha256:939bb3eb4be6e159e824b7f0b698a4e53e1b6ee59a7190d462cbc332a1731fec
+```
+
+> Если вывод команды потерялся, токены можно посмотреть командой: **kubeadm token list**  
+> Получить хеш
+
+```console
+openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der
+2>/dev/null | \
+openssl dgst -sha256 -hex | sed 's/^.* //'
+```
+
+- Проверяем
+
+```console
+kubectl get nodes
+NAME      STATUS   ROLES    AGE     VERSION
+master    Ready    master   7m40s   v1.17.4
+worker1   Ready    <none>   2m6s    v1.17.4
+worker2   Ready    <none>   86s     v1.17.4
+worker3   Ready    <none>   59s     v1.17.4
+```
+
+- Запуск нагрузки
 
 ```yml
-env:
-  - name: "JOURNAL_DIRECTORY"
-    value: "/var/log/journal"
-  - name: "IPTABLES_LOG_PREFIX"
-    value: "calico-packet:"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 4
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.17.2
+        ports:
+        - containerPort: 80
 ```
 
-> iptables-tailer умеет работать с systemd journal - для этого надо передать ему параметр JOURNAL_DIRECTORY б указав каталог с файлами журнала (по умолчанию, /var/log/journal)  
-
 ```console
-kubectl apply -f kit/deploy/kit-serviceaccount.yaml
-kubectl apply -f kit/deploy/kit-clusterrole.yaml
-kubectl apply -f kit/deploy/kit-clusterrolebinding.yaml
-kubectl apply -f kit/deploy/iptables-tailer.yaml
+kubectl apply -f deployment.yaml
+deployment.apps/nginx-deployment created
 ```
 
-Перезапустим тест удалив cr и создав вновь
-
 ```console
-kubectl delete -f kit/deploy/cr.yaml
-netperf.app.example.com "example" deleted
-
-kubectl apply -f kit/deploy/cr.yaml
-netperf.app.example.com/example created
+kubectl get pods
+NAME                               READY   STATUS    RESTARTS   AGE
+nginx-deployment-c8fd555cc-46jzj   1/1     Running   0          41s
+nginx-deployment-c8fd555cc-h8frd   1/1     Running   0          41s
+nginx-deployment-c8fd555cc-jnkw4   1/1     Running   0          41s
+nginx-deployment-c8fd555cc-m5nf4   1/1     Running   0          41s
 ```
 
-Проверим
+- Обновляем кластер
+
+Так как кластер мы разворачивали с помощью kubeadm, то и производить обновление будем с помощью него.  
+Обновлять ноды будем по очереди.
+
+Допускается, отставание версий worker-нод от master, но не наоборот. Поэтому обновление будем начинать с нее master-нода у нас версии 1.16.8
+
+- Обновляем пакеты
 
 ```console
-kubectl describe pod --selector=app=netperf-operator
-Name:         netperf-server-f6b4c7e04d56
-Namespace:    default
-Priority:     0
-Node:         gke-cluster-1-default-pool-068f038d-4h0p/10.166.0.3
-Start Time:   Fri, 31 Jul 2020 18:11:25 +0300
-Labels:       app=netperf-operator
-              netperf-type=server
-Annotations:  cni.projectcalico.org/podIP: 10.32.1.4/32
-              kubernetes.io/limit-ranger: LimitRanger plugin set: cpu request for container netperf-server-f6b4c7e04d56
-Status:       Running
-IP:           10.32.1.4
+apt-get update && apt-get install -y kubeadm=1.18.0-00 \
+kubelet=1.18.0-00 kubectl=1.18.0-00
+```
+
+- Проверка
+
+```console
+kubectl get nodes
+NAME      STATUS   ROLES    AGE     VERSION
+master    Ready    master   14m     v1.18.0
+worker1   Ready    <none>   8m55s   v1.17.4
+worker2   Ready    <none>   8m15s   v1.17.4
+worker3   Ready    <none>   7m48s   v1.17.4
+```
+
+```console
+kubelet --version
+Kubernetes v1.18.0
+
+cat /etc/kubernetes/manifests/kube-apiserver.yaml
+image: k8s.gcr.io/kube-apiserver:v1.17.4
+```
+
+- Обновим остальные компоненты кластера
+
+```console
+kubeadm upgrade plan
+[upgrade/config] Making sure the configuration is correct:
+[upgrade/config] Reading configuration from the cluster...
+[upgrade/config] FYI: You can look at this config file with 'kubectl -n kube-system get cm kubeadm-config -oyaml'
+[preflight] Running pre-flight checks.
+[upgrade] Running cluster health checks
+[upgrade] Fetching available versions to upgrade to
+[upgrade/versions] Cluster version: v1.17.9
+[upgrade/versions] kubeadm version: v1.18.0
+[upgrade/versions] Latest stable version: v1.18.6
+[upgrade/versions] Latest stable version: v1.18.6
+[upgrade/versions] Latest version in the v1.17 series: v1.17.9
+[upgrade/versions] Latest version in the v1.17 series: v1.17.9
+Components that must be upgraded manually after you have upgraded the control plane with 'kubeadm upgrade apply':
+COMPONENT   CURRENT       AVAILABLE
+Kubelet     3 x v1.17.4   v1.18.6
+            1 x v1.18.0   v1.18.6
+Upgrade to the latest stable version:
+COMPONENT            CURRENT   AVAILABLE
+API Server           v1.17.9   v1.18.6
+Controller Manager   v1.17.9   v1.18.6
+Scheduler            v1.17.9   v1.18.6
+Kube Proxy           v1.17.9   v1.18.6
+CoreDNS              1.6.5     1.6.7
+Etcd                 3.4.3     3.4.3-0
+You can now apply the upgrade by executing the following command:
+        kubeadm upgrade apply v1.18.6
+Note: Before you can perform this upgrade, you have to update kubeadm to v1.18.6.
+_____________________________________________________________________
+```
+
+- Применим изменения
+
+```console
+kubeadm upgrade apply v1.18.0
+```
+
+- Проверка
+
+```console
+kubeadm version
+kubeadm version: &version.Info{Major:"1", Minor:"18", GitVersion:"v1.18.0", GitCommit:"9e991415386e4cf155a24b1da15b
+ecaa390438d8", GitTreeState:"clean", BuildDate:"2020-03-25T14:56:30Z", GoVersion:"go1.13.8", Compiler:"gc", Platfor
+m:"linux/amd64"}
+
+kubelet --version
+Kubernetes v1.18.0
+
+kubectl version
+Client Version: version.Info{Major:"1", Minor:"18", GitVersion:"v1.18.0", GitCommit:"9e991415386e4cf155a24b1da15bec
+aa390438d8", GitTreeState:"clean", BuildDate:"2020-03-25T14:58:59Z", GoVersion:"go1.13.8", Compiler:"gc", Platform:
+"linux/amd64"}
+Server Version: version.Info{Major:"1", Minor:"18", GitVersion:"v1.18.0", GitCommit:"9e991415386e4cf155a24b1da15bec
+aa390438d8", GitTreeState:"clean", BuildDate:"2020-03-25T14:50:46Z", GoVersion:"go1.13.8", Compiler:"gc", Platform:
+"linux/amd64"}
+```
+
+```console
+kubectl describe pod kube-apiserver-master -n kube-system
+Name:                 kube-apiserver-master
+Namespace:            kube-system
+Priority:             2000000000
+Priority Class Name:  system-cluster-critical
+Node:                 master/10.132.0.52
+Start Time:           Fri, 31 Jul 2020 22:17:25 +0000
+Labels:               component=kube-apiserver
+                      tier=control-plane
+Annotations:          kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint: 10.132.0.52:6443
+                      kubernetes.io/config.hash: 6f8d44727c25dcb6d73add9fc1b1ea33
+                      kubernetes.io/config.mirror: 6f8d44727c25dcb6d73add9fc1b1ea33
+                      kubernetes.io/config.seen: 2020-07-31T22:33:56.757141182Z
+                      kubernetes.io/config.source: file
+Status:               Running
+IP:                   10.132.0.52
 IPs:
-  IP:           10.32.1.4
-Controlled By:  Netperf/example
+  IP:           10.132.0.52
+Controlled By:  Node/master
 Containers:
-  netperf-server-f6b4c7e04d56:
-    Container ID:   docker://47233e57a3a83ef573d8e28be8adbaf2f6cb14b25869e204e4b84c5b13e24a3a
-    Image:          tailoredcloud/netperf:v2.7
-    Image ID:       docker-pullable://tailoredcloud/netperf@sha256:0361f1254cfea87ff17fc1bd8eda95f939f99429856f766db3340c8cdfed1cf1
-    Port:           <none>
-    Host Port:      <none>
+  kube-apiserver:
+    Container ID:  docker://53f03fb4f66819192bdf6c189a4d584aa386ce4304fa1447b1e3201da4bea860
+    Image:         k8s.gcr.io/kube-apiserver:v1.18.0
+    Image ID:      docker-pullable://k8s.gcr.io/kube-apiserver@sha256:fc4efb55c2a7d4e7b9a858c67e24f00e739df4ef50825
+00c2b60ea0903f18248
+    Port:          <none>
+    Host Port:     <none>
+    Command:
+      kube-apiserver
+      --advertise-address=10.132.0.52
+      --allow-privileged=true
+      --authorization-mode=Node,RBAC
+      --client-ca-file=/etc/kubernetes/pki/ca.crt
+      --enable-admission-plugins=NodeRestriction
+      --enable-bootstrap-token-auth=true
+      --etcd-cafile=/etc/kubernetes/pki/etcd/ca.crt
+      --etcd-certfile=/etc/kubernetes/pki/apiserver-etcd-client.crt
+      --etcd-keyfile=/etc/kubernetes/pki/apiserver-etcd-client.key
+      --etcd-servers=https://127.0.0.1:2379
+      --insecure-port=0
+      --kubelet-client-certificate=/etc/kubernetes/pki/apiserver-kubelet-client.crt
+      --kubelet-client-key=/etc/kubernetes/pki/apiserver-kubelet-client.key
+      --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+      --proxy-client-cert-file=/etc/kubernetes/pki/front-proxy-client.crt
+      --proxy-client-key-file=/etc/kubernetes/pki/front-proxy-client.key
+      --requestheader-allowed-names=front-proxy-client
+      --requestheader-client-ca-file=/etc/kubernetes/pki/front-proxy-ca.crt
+      --requestheader-extra-headers-prefix=X-Remote-Extra-
+      --requestheader-group-headers=X-Remote-Group
+      --requestheader-username-headers=X-Remote-User
+      --secure-port=6443
+      --service-account-key-file=/etc/kubernetes/pki/sa.pub
+      --service-cluster-ip-range=10.96.0.0/12
+      --tls-cert-file=/etc/kubernetes/pki/apiserver.crt
+      --tls-private-key-file=/etc/kubernetes/pki/apiserver.key
     State:          Running
-      Started:      Fri, 31 Jul 2020 18:11:30 +0300
+      Started:      Fri, 31 Jul 2020 22:33:57 +0000
     Ready:          True
     Restart Count:  0
     Requests:
-      cpu:        100m
+      cpu:        250m
+    Liveness:     http-get https://10.132.0.52:6443/healthz delay=15s timeout=15s period=10s #success=1 #failure=8
     Environment:  <none>
     Mounts:
-      /var/run/secrets/kubernetes.io/serviceaccount from default-token-66ln5 (ro)
+      /etc/ca-certificates from etc-ca-certificates (ro)
+      /etc/kubernetes/pki from k8s-certs (ro)
+      /etc/ssl/certs from ca-certs (ro)
+      /usr/local/share/ca-certificates from usr-local-share-ca-certificates (ro)
+      /usr/share/ca-certificates from usr-share-ca-certificates (ro)
 Conditions:
   Type              Status
   Initialized       True
@@ -253,67 +357,399 @@ Conditions:
   ContainersReady   True
   PodScheduled      True
 Volumes:
-  default-token-66ln5:
-    Type:        Secret (a volume populated by a Secret)
-    SecretName:  default-token-66ln5
-    Optional:    false
-QoS Class:       Burstable
-Node-Selectors:  <none>
-Tolerations:     node.kubernetes.io/not-ready:NoExecute for 300s
-                 node.kubernetes.io/unreachable:NoExecute for 300s
+  ca-certs:
+    Type:          HostPath (bare host directory volume)
+    Path:          /etc/ssl/certs
+    HostPathType:  DirectoryOrCreate
+  etc-ca-certificates:
+    Type:          HostPath (bare host directory volume)
+    Path:          /etc/ca-certificates
+    HostPathType:  DirectoryOrCreate
+  k8s-certs:
+    Type:          HostPath (bare host directory volume)
+    Path:          /etc/kubernetes/pki
+    HostPathType:  DirectoryOrCreate
+  usr-local-share-ca-certificates:
+    Type:          HostPath (bare host directory volume)
+    Path:          /usr/local/share/ca-certificates
+    HostPathType:  DirectoryOrCreate
+  usr-share-ca-certificates:
+    Type:          HostPath (bare host directory volume)
+    Path:          /usr/share/ca-certificates
+    HostPathType:  DirectoryOrCreate
+QoS Class:         Burstable
+Node-Selectors:    <none>
+Tolerations:       :NoExecute
 Events:
-  Type     Reason      Age                    From                                               Message
-  ----     ------      ----                   ----                                               -------
-  Normal   Scheduled   9m34s                  default-scheduler                                  Successfully assigned default/netperf-server-f6b4c7e04d56 to gke-cluster-1-default-pool-068f038d-4h0p
-  Normal   Pulling     9m33s                  kubelet, gke-cluster-1-default-pool-068f038d-4h0p  Pulling image "tailoredcloud/netperf:v2.7"
-  Normal   Pulled      9m30s                  kubelet, gke-cluster-1-default-pool-068f038d-4h0p  Successfully pulled image "tailoredcloud/netperf:v2.7"
-  Normal   Created     9m30s                  kubelet, gke-cluster-1-default-pool-068f038d-4h0p  Created container netperf-server-f6b4c7e04d56
-  Normal   Started     9m29s                  kubelet, gke-cluster-1-default-pool-068f038d-4h0p  Started container netperf-server-f6b4c7e04d56
-  Warning  PacketDrop  9m24s                  kube-iptables-tailer                               Packet dropped when receiving traffic from 10.32.2.8
-  Warning  PacketDrop  2m14s (x3 over 7m12s)  kube-iptables-tailer                               Packet dropped when receiving traffic from client (10.32.2.8)
+  Type    Reason   Age    From             Message
+  ----    ------   ----   ----             -------
+  Normal  Pulled   2m28s  kubelet, master  Container image "k8s.gcr.io/kube-apiserver:v1.18.0" already present on m
+achine
+  Normal  Created  2m28s  kubelet, master  Created container kube-apiserver
+  Normal  Started  2m28s  kubelet, master  Started container kube-apiserver
 ```
 
-> Теперь можно наблюдать в events сообщения о дропах пакетов
+- Вывод worker-нод из планирования
 
-### Задание со ⭐
-
-- Исправим ошибку в нашей сетевой политике, чтобы Netperf снова начал работать
-
-```yml
-ingress:
-  - action: Allow
-    source:
-      selector: app == "netperf-operator"
-  - action: Log
-  - action: Deny
-egress:
-  - action: Allow
-    destination:
-      selector: app == "netperf-operator"
-  - action: Log
-  - action: Deny
-```
-
-- Поправим манифест DaemonSet из репозитория, чтобы в логах отображались имена Podов, а не их IP-адреса
-
-Приведем iptables-tailer.yaml к следующему виду
-
-```yml
-env:
-  - name: "POD_IDENTIFIER"
-    value: "name"
-# - name: "POD_IDENTIFIER_LABEL"
-#   value: "netperf-type"
-```
-
-Результат:
+Первым делом, мы сливаем всю нагрузку с ноды и выводим ее из планирования
 
 ```console
-Events:
-  Type     Reason      Age    From                                               Message
-  ----     ------      ----   ----                                               -------
-  Warning  PacketDrop  89s    kube-iptables-tailer                               Packet dropped when receiving traffic from netperf-client-6a28b0921dda (10.32.2.14)
+kubectl drain worker1
+node/worker1 cordoned
+error: unable to drain node "worker1", aborting command...
+There are pending nodes to be drained:
+ worker1
+error: cannot delete DaemonSet-managed Pods (use --ignore-daemonsets to ignore): kube-system/calico-node-26ppd, kub
+e-system/kube-proxy-clnf8
 ```
+
+> kubectl drain убирает всю нагрузку, кроме DaemonSet, поэтому мы явно должны сказать, что уведомлены об этом
+
+```console
+kubectl drain worker1 --ignore-daemonsets
+node/worker1 already cordoned
+WARNING: ignoring DaemonSet-managed Pods: kube-system/calico-node-26ppd, kube-system/kube-proxy-clnf8
+evicting pod default/nginx-deployment-c8fd555cc-h8frd
+evicting pod default/nginx-deployment-c8fd555cc-m5nf4
+pod/nginx-deployment-c8fd555cc-h8frd evicted
+pod/nginx-deployment-c8fd555cc-m5nf4 evicted
+node/worker1 evicted
+```
+
+- Когда мы вывели ноду на обслуживание, к статусу добавилась строчка SchedulingDisabled
+
+```console
+kubectl get nodes -o wide
+NAME      STATUS                     ROLES    AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION   CONTAINER-RUNTIME
+master    Ready                      master   22m   v1.18.0   10.132.0.52   <none>        Ubuntu 18.04.4 LTS   5.3.0-1032-gcp   docker://19.3.8
+worker1   Ready,SchedulingDisabled   <none>   17m   v1.17.4   10.132.0.53   <none>        Ubuntu 18.04.4 LTS   5.3.0-1032-gcp   docker://19.3.8
+worker2   Ready                      <none>   16m   v1.17.4   10.132.0.54   <none>        Ubuntu 18.04.4 LTS   5.3.0-1032-gcp   docker://19.3.8
+worker3   Ready                      <none>   15m   v1.17.4   10.132.0.55   <none>        Ubuntu 18.04.4 LTS   5.3.0-1032-gcp   docker://19.3.8
+```
+
+- Обновление worker-нод
+
+```console
+apt-get install -y kubelet=1.18.0-00 kubeadm=1.18.0-00
+systemctl restart kubelet
+```
+
+- После обновления kubectl показывает новую версию, и статус SchedulingDisabled
+
+```console
+kubectl get nodes
+NAME      STATUS                     ROLES    AGE   VERSION
+master    Ready                      master   23m   v1.18.0
+worker1   Ready,SchedulingDisabled   <none>   18m   v1.18.0
+worker2   Ready                      <none>   17m   v1.17.4
+worker3   Ready                      <none>   16m   v1.17.4
+```
+
+- Командой kubectl uncordon worker-instance-1 возвращаем ноду обратно в планирование нагрузки
+
+```console
+kubectl uncordon worker1
+```
+
+- Обновим остальные ноды и получим
+
+```console
+kubectl get nodes
+NAME      STATUS   ROLES    AGE   VERSION
+master    Ready    master   27m   v1.18.0
+worker1   Ready    <none>   21m   v1.18.0
+worker2   Ready    <none>   21m   v1.18.0
+worker3   Ready    <none>   20m   v1.18.0
+```
+
+### Автоматическое развертывание кластеров
+
+В данном задании ради демонстрации механики обновления мы вручную развернули и обновили кластер с одной master-нодой.
+
+Но развертывать большие кластера подобным способом не удобно. Поэтому мы рассмотрим инструмент для автоматического развертывания кластеров [kubespray](https://github.com/kubernetes-sigs/kubespray).
+
+Kubespray - это Ansible playbook для установки Kubernetes. Для его использования достаточно иметь SSH-доступ на машины, поэтому не важно как они были созданы (Cloud, Bare-metal).
+
+- Установка kubespray
+
+Пре-реквизиты:
+
+- Python и pip на локальной машине
+- SSH доступ на все ноды кластера
+
+```console
+# получение kubespray
+git clone https://github.com/kubernetes-sigs/kubespray.git
+# установка зависимостей
+sudo pip install -r requirements.txt
+# копирование примера конфига в отдельную директорию
+cp -rfp inventory/sample inventory/mycluster
+```
+
+Добавьте адреса машин кластера в конфиг kubespray inventory/mycluster/inventory.ini:
+
+```console
+# в блоке all мы описывем все машины (master и worker)
+# для мастер нод мы указывем переменную etcd_member_name
+[all]
+node1 ansible_host=192.168.10.1 etcd_member_name=etcd1
+node2 ansible_host=192.168.10.2
+node3 ansible_host=192.168.10.3
+node4 ansible_host=192.168.10.4
+# в блоке kube-master мы указывем master-ноды
+[kube-master]
+node1
+# в блоке etcd ноды, где будет установлен etcd
+# если мы хотим HA кластер, то etcd устанавливаетcя отдельно от API-server
+[etcd]
+node1
+# в блоке kube-node описываем worker-ноды
+[kube-node]
+node2
+node3
+node4
+# в блоке k8s-cluster:children соединяем kube-master и kube-node
+[k8s-cluster:children]
+kube-master
+kube-node
+```
+
+- После редактирования конфига можно устанавливать кластер
+
+```console
+ansible-playbook -i inventory/mycluster/inventory.ini --become --become-user=root \
+--user=${SSH_USERNAME} --key-file=${SSH_PRIVATE_KEY} cluster.yml
+```
+
+### kubeadm | Задание со ⭐
+
+Выполним установку кластера с 3 master-нодами, 2 worker нодами и external etcd topology. Используем kubeadm, keekalived, haproxy.  
+[Документация](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/)
+
+#### etcd1
+
+/etc/keepalived/keepalived.conf
+
+```console
+! /etc/keepalived/keepalived.conf
+! Configuration File for keepalived
+global_defs {
+    router_id LVS_DEVEL
+}
+vrrp_script check_apiserver {
+  script "/etc/keepalived/check_apiserver.sh"
+  interval 3
+  weight -2
+  fall 10
+  rise 2
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface ens160
+    virtual_router_id 51
+    priority 101
+    authentication {
+        auth_type PASS
+        auth_pass 42
+    }
+    virtual_ipaddress {
+        10.2.1.1
+    }
+    track_script {
+        check_apiserver
+    }
+}
+```
+
+/etc/keepalived/check_apiserver.sh
+
+```bash
+#!/bin/sh
+
+errorExit() {
+    echo "*** $*" 1>&2
+    exit 1
+}
+
+curl --silent --max-time 2 --insecure https://localhost:6443/healthz -o /dev/null || errorExit "Error GET https://localhost:6443/healthz"
+if ip addr | grep -q 10.2.1.1; then
+    curl --silent --max-time 2 --insecure https://10.2.1.1:6443/healthz -o /dev/null || errorExit "Error GET https://10.2.1.1:6443/healthz"
+fi
+```
+
+/etc/haproxy/haproxy.cfg
+
+```console
+# /etc/haproxy/haproxy.cfg
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    daemon
+
+#---------------------------------------------------------------------
+# common defaults that all the 'listen' and 'backend' sections will
+# use if not designated in their block
+#---------------------------------------------------------------------
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 1
+    timeout http-request    10s
+    timeout queue           20s
+    timeout connect         5s
+    timeout client          20s
+    timeout server          20s
+    timeout http-keep-alive 10s
+    timeout check           10s
+
+#---------------------------------------------------------------------
+# apiserver frontend which proxys to the masters
+#---------------------------------------------------------------------
+frontend apiserver
+    bind *:6443
+    mode tcp
+    option tcplog
+    default_backend apiserver
+
+#---------------------------------------------------------------------
+# round robin balancing for apiserver
+#---------------------------------------------------------------------
+backend apiserver
+    mode tcp
+    balance roundrobin
+    option tcp-check
+        server dev_master1 10.2.1.5:6443 check
+        server dev_master2 10.2.1.6:6443 check
+        server dev_master2 10.2.1.7:6443 check
+```
+
+#### etcd2
+
+/etc/keepalived/keepalived.conf
+
+```console
+! /etc/keepalived/keepalived.conf
+! Configuration File for keepalived
+global_defs {
+    router_id LVS_DEVEL
+}
+vrrp_script check_apiserver {
+  script "/etc/keepalived/check_apiserver.sh"
+  interval 3
+  weight -2
+  fall 10
+  rise 2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface ens160
+    virtual_router_id 51
+    priority 100
+    authentication {
+        auth_type PASS
+        auth_pass 42
+    }
+    virtual_ipaddress {
+        10.2.1.1
+    }
+    track_script {
+        check_apiserver
+    }
+}
+```
+
+/etc/keepalived/check_apiserver.sh
+
+```bash
+#!/bin/sh
+
+errorExit() {
+    echo "*** $*" 1>&2
+    exit 1
+}
+
+curl --silent --max-time 2 --insecure https://localhost:6443/healthz -o /dev/null || errorExit "Error GET https://localhost:6443/healthz"
+if ip addr | grep -q 10.2.1.1; then
+    curl --silent --max-time 2 --insecure https://10.2.1.1:6443/healthz -o /dev/null || errorExit "Error GET https://10.2.1.1:6443/healthz"
+fi
+```
+
+/etc/haproxy/haproxy.cfg
+
+```console
+# /etc/haproxy/haproxy.cfg
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    daemon
+
+#---------------------------------------------------------------------
+# common defaults that all the 'listen' and 'backend' sections will
+# use if not designated in their block
+#---------------------------------------------------------------------
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 1
+    timeout http-request    10s
+    timeout queue           20s
+    timeout connect         5s
+    timeout client          20s
+    timeout server          20s
+    timeout http-keep-alive 10s
+    timeout check           10s
+
+#---------------------------------------------------------------------
+# apiserver frontend which proxys to the masters
+#---------------------------------------------------------------------
+frontend apiserver
+    bind *:6443
+    mode tcp
+    option tcplog
+    default_backend apiserver
+
+#---------------------------------------------------------------------
+# round robin balancing for apiserver
+#---------------------------------------------------------------------
+backend apiserver
+    mode tcp
+    balance roundrobin
+    option tcp-check
+        server dev_master1 10.2.1.5:6443 check
+        server dev_master2 10.2.1.6:6443 check
+        server dev_master2 10.2.1.7:6443 check
+```
+
+Результат
+
+```console
+kubectl get nodes
+NAME          STATUS   ROLES    AGE   VERSION
+dev-master1   Ready    master   1d    v1.18.3
+dev-master2   Ready    master   1d    v1.18.3
+dev-master3   Ready    master   1d    v1.18.3
+dev-worker1   Ready    <none>   1d    v1.18.3
+dev-worker2   Ready    <none>   1d    v1.18.3
+
+````
 
 ## CSI
 
@@ -8601,7 +9037,7 @@ NAME                                       CAPACITY   ACCESS MODES   RECLAIM POL
 pvc-30f9d611-009d-4b70-90c1-4eee8b707cfe   10Gi       RWO            Delete           Bound    default/data-minio-0   standard                7h7m
 ```
 
-### Задание со (⭐)
+### Задание со ⭐
 
 В конфигурации нашего StatefulSet данные указаны в открытом виде, что не безопасно.  
 Поместим данные в [secrets](https://kubernetes.io/docs/concepts/configuration/secret/) и настроим конфигурацию на их использование.
